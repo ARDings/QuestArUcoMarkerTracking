@@ -54,6 +54,14 @@ namespace TryAR.MarkerTracking
 
         private Texture2D m_resultTexture;
 
+        [Header("Object Spawning")]
+        [SerializeField] private Transform m_spawnedObjectsContainer;
+        private List<GameObject> m_spawnedObjects = new List<GameObject>();
+
+        // Neue Variablen für das Sammeln von Marker-Positionen
+        private Dictionary<int, List<Pose>> m_collectedMarkerPoses = new Dictionary<int, List<Pose>>();
+        private bool m_isCollectingPoses = false;
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -129,6 +137,9 @@ namespace TryAR.MarkerTracking
             // Toggle between camera view and AR visualization on button press
             HandleVisualizationToggle();
             
+            // Handle object spawning and deletion
+            HandleObjectSpawningAndDeletion();
+            
             // Update tracking and visualization
             UpdateCameraPoses();
             
@@ -151,6 +162,197 @@ namespace TryAR.MarkerTracking
                 m_cameraCanvas.gameObject.SetActive(m_showCameraCanvas);
                 SetMarkerObjectsVisibility(!m_showCameraCanvas);
             }
+        }
+
+        /// <summary>
+        /// Handles spawning objects with Y button and deleting with left thumbstick click
+        /// </summary>
+        private void HandleObjectSpawningAndDeletion()
+        {
+            // Sammle Marker-Positionen, wenn Y Button gedrückt wird
+            if (OVRInput.Get(OVRInput.Button.Two))
+            {
+                if (!m_isCollectingPoses)
+                {
+                    // Starte das Sammeln, wenn der Button gerade gedrückt wurde
+                    StartCollectingMarkerPoses();
+                }
+                else
+                {
+                    // Sammle kontinuierlich Posen, während der Button gehalten wird
+                    CollectCurrentMarkerPoses();
+                }
+            }
+            else if (m_isCollectingPoses)
+            {
+                // Button wurde losgelassen, spawne Objekte mit gemittelten Positionen
+                SpawnMarkerObjectsWithAveragedPoses();
+                m_isCollectingPoses = false;
+            }
+            
+            // Delete all spawned objects when left thumbstick is clicked
+            if (OVRInput.GetDown(OVRInput.Button.PrimaryThumbstick))
+            {
+                DeleteAllSpawnedObjects();
+            }
+        }
+        
+        /// <summary>
+        /// Startet das Sammeln von Marker-Positionen
+        /// </summary>
+        private void StartCollectingMarkerPoses()
+        {
+            m_collectedMarkerPoses.Clear();
+            m_isCollectingPoses = true;
+            Debug.Log("Started collecting marker poses...");
+        }
+        
+        /// <summary>
+        /// Sammelt die aktuellen Positionen und Rotationen aller sichtbaren Marker
+        /// </summary>
+        private void CollectCurrentMarkerPoses()
+        {
+            foreach (var pair in m_markerGameObjectDictionary)
+            {
+                int markerId = pair.Key;
+                GameObject markerObject = pair.Value;
+                
+                // Überspringe, wenn das Marker-Objekt nicht aktiv ist
+                if (markerObject == null || !markerObject.activeSelf)
+                    continue;
+                    
+                // Erstelle eine neue Pose aus der aktuellen Position und Rotation
+                Pose currentPose = new Pose(markerObject.transform.position, markerObject.transform.rotation);
+                
+                // Füge die Pose zur Liste für diesen Marker hinzu
+                if (!m_collectedMarkerPoses.ContainsKey(markerId))
+                {
+                    m_collectedMarkerPoses[markerId] = new List<Pose>();
+                }
+                
+                m_collectedMarkerPoses[markerId].Add(currentPose);
+            }
+        }
+        
+        /// <summary>
+        /// Berechnet die durchschnittliche Position und Rotation für jeden Marker
+        /// und spawnt Objekte an diesen Positionen
+        /// </summary>
+        private void SpawnMarkerObjectsWithAveragedPoses()
+        {
+            foreach (var pair in m_collectedMarkerPoses)
+            {
+                int markerId = pair.Key;
+                List<Pose> poses = pair.Value;
+                
+                // Überspringe, wenn keine Posen gesammelt wurden
+                if (poses.Count == 0)
+                    continue;
+                    
+                // Berechne die durchschnittliche Position
+                Vector3 avgPosition = Vector3.zero;
+                foreach (var pose in poses)
+                {
+                    avgPosition += pose.position;
+                }
+                avgPosition /= poses.Count;
+                
+                // Berechne die durchschnittliche Rotation
+                Quaternion avgRotation = AverageQuaternions(poses.ConvertAll(p => p.rotation));
+                
+                // Hole das zugehörige Marker-Objekt
+                if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
+                {
+                    // Erstelle eine Kopie des Marker-Objekts an der gemittelten Position
+                    GameObject copy = Instantiate(markerObject, avgPosition, avgRotation);
+                    
+                    // Stelle sicher, dass die Kopie sichtbar ist
+                    var rendererList = copy.GetComponentsInChildren<Renderer>(true);
+                    foreach (var renderer in rendererList)
+                    {
+                        renderer.enabled = true;
+                    }
+                    
+                    // Füge zum Container hinzu, falls verfügbar
+                    if (m_spawnedObjectsContainer != null)
+                    {
+                        copy.transform.SetParent(m_spawnedObjectsContainer);
+                    }
+                    
+                    // Zur Liste hinzufügen
+                    m_spawnedObjects.Add(copy);
+                    
+                    Debug.Log($"Spawned object for marker ID {markerId} at averaged position from {poses.Count} samples");
+                }
+            }
+            
+            // Leere die gesammelten Posen
+            m_collectedMarkerPoses.Clear();
+        }
+        
+        /// <summary>
+        /// Berechnet den Durchschnitt mehrerer Quaternions
+        /// </summary>
+        private Quaternion AverageQuaternions(List<Quaternion> quaternions)
+        {
+            if (quaternions.Count == 0)
+                return Quaternion.identity;
+                
+            if (quaternions.Count == 1)
+                return quaternions[0];
+                
+            // Implementierung basierend auf der Methode von Markley et al.
+            Vector4 summedQuaternion = Vector4.zero;
+            
+            foreach (var quat in quaternions)
+            {
+                // Stelle sicher, dass alle Quaternions im gleichen Halbraum sind
+                float weight = 1.0f / quaternions.Count;
+                float dot = Quaternion.Dot(quat, quaternions[0]);
+                
+                if (dot < 0)
+                {
+                    summedQuaternion += new Vector4(-quat.x, -quat.y, -quat.z, -quat.w) * weight;
+                }
+                else
+                {
+                    summedQuaternion += new Vector4(quat.x, quat.y, quat.z, quat.w) * weight;
+                }
+            }
+            
+            // Normalisiere das Ergebnis
+            float magnitude = Mathf.Sqrt(summedQuaternion.x * summedQuaternion.x +
+                                        summedQuaternion.y * summedQuaternion.y +
+                                        summedQuaternion.z * summedQuaternion.z +
+                                        summedQuaternion.w * summedQuaternion.w);
+                                        
+            if (magnitude > 0.0001f)
+            {
+                summedQuaternion /= magnitude;
+            }
+            else
+            {
+                return Quaternion.identity;
+            }
+            
+            return new Quaternion(summedQuaternion.x, summedQuaternion.y, summedQuaternion.z, summedQuaternion.w);
+        }
+
+        /// <summary>
+        /// Deletes all previously spawned marker object copies
+        /// </summary>
+        private void DeleteAllSpawnedObjects()
+        {
+            foreach (var obj in m_spawnedObjects)
+            {
+                if (obj != null)
+                {
+                    Destroy(obj);
+                }
+            }
+            
+            m_spawnedObjects.Clear();
+            Debug.Log("Deleted all spawned objects");
         }
 
         /// <summary>
@@ -195,6 +397,13 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void InitializeMarkerTracking()
         {
+            // Create spawn container if it doesn't exist
+            if (m_spawnedObjectsContainer == null)
+            {
+                GameObject container = new GameObject("SpawnedObjectsContainer");
+                m_spawnedObjectsContainer = container.transform;
+            }
+            
             // Step 1: Set up camera parameters for tracking
             // These intrinsic parameters are essential for accurate marker pose estimation
             var intrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
