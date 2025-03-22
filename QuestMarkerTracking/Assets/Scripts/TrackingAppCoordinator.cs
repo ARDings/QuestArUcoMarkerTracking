@@ -266,11 +266,27 @@ namespace TryAR.MarkerTracking
                     // Erstelle eine Kopie des Marker-Objekts an der gemittelten Position
                     GameObject copy = Instantiate(markerObject, avgPosition, avgRotation);
                     
-                    // Stelle sicher, dass die Kopie sichtbar ist
+                    // Generiere eine zufällige Farbe (Alpha bleibt unverändert)
+                    Color randomColor = new Color(
+                        UnityEngine.Random.value,  // Rot
+                        UnityEngine.Random.value,  // Grün
+                        UnityEngine.Random.value   // Blau
+                    );
+                    
+                    // Wende die Farbe auf alle Renderer-Komponenten an
                     var rendererList = copy.GetComponentsInChildren<Renderer>(true);
                     foreach (var renderer in rendererList)
                     {
                         renderer.enabled = true;
+                        foreach (var material in renderer.materials)
+                        {
+                            material.color = new Color(
+                                randomColor.r,
+                                randomColor.g,
+                                randomColor.b,
+                                0.6f  // Setze Transparenz auf 60%
+                            );
+                        }
                     }
                     
                     // Füge zum Container hinzu, falls verfügbar
