@@ -74,3 +74,4 @@ crashlytics-build.properties
 /[Aa]ssets/[Ss]treamingAssets/aa/*
 QuestMarkerTracking/Assets/OpenCVForUnity
 QuestMarkerTracking/Assets/OpenCVForUnity.meta
+.DS_Store
