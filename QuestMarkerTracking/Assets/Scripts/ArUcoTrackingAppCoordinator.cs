@@ -8,6 +8,10 @@ using UnityEngine;
 using UnityEngine.Assertions;
 using PassthroughCameraSamples;
 using UnityEngine.UI;
+using OpenCVForUnity.CoreModule;
+using OpenCVForUnity.ImgprocModule;
+using OpenCVForUnity.UnityUtils;
+using TryAR.ColorTracking;  // Für die ColorObject Klasse
 
 namespace TryAR.MarkerTracking
 {
@@ -52,7 +56,48 @@ namespace TryAR.MarkerTracking
         private Dictionary<int, GameObject> m_markerGameObjectDictionary = new Dictionary<int, GameObject>();
         private bool m_showCameraCanvas = true;
 
-        private Texture2D m_resultTexture;
+        private Texture2D m_resultTexture;        // Für Marker-Tracking
+        private Texture2D m_colorDebugTexture;    // Für Ball-Tracking
+
+        [Header("Object Spawning")]
+        [SerializeField] private Transform m_spawnedObjectsContainer;
+        private List<GameObject> m_spawnedObjects = new List<GameObject>();
+
+        // Neue Variablen für das Sammeln von Marker-Positionen
+        private Dictionary<int, List<Pose>> m_collectedMarkerPoses = new Dictionary<int, List<Pose>>();
+        private bool m_isCollectingPoses = false;
+
+        [Header("Tracking Mode")]
+        [SerializeField] private bool m_enableMarkerTracking = true;
+        [SerializeField] private bool m_enableColorTracking = true;
+
+        [Header("Color Tracking")]
+        [SerializeField] private bool m_showColorDebugView = true;
+        [SerializeField, Tooltip("Der tatsächliche Durchmesser des Balls in Metern (z.B. 0.1 für einen 10cm Ball)")]
+        private float m_ballDiameterInMeters = 0.1f; // 10cm Standard
+        [SerializeField] private GameObject m_ballVisualization;
+
+        [Header("Pink Ball HSV Settings")]
+        [SerializeField, Tooltip("HSV Minimum Werte (H: 0-180, S: 0-255, V: 0-255)")]
+        private Vector3 m_pinkHSVMin = new Vector3(140, 50, 150);  // Helleres Pink, weniger Sättigung
+        [SerializeField, Tooltip("HSV Maximum Werte (H: 0-180, S: 0-255, V: 0-255)")]
+        private Vector3 m_pinkHSVMax = new Vector3(175, 255, 255);  // Breiterer Farbbereich für verschiedene Lichtverhältnisse
+
+        private ColorObject m_pinkBall;
+        private Mat m_rgbMat;
+        private Mat m_hsvMat;
+        private Mat m_thresholdMat;
+
+        [Header("HSV Control Settings")]
+        [SerializeField] private float m_hsvAdjustSpeed = 2f;  // Geschwindigkeit der Anpassung
+        [SerializeField] private bool m_showHSVDebug = true;   // HSV Werte im Debug anzeigen
+
+        [Header("Ball Position Settings")]
+        [SerializeField] private Vector3 m_ballOffset = Vector3.zero;
+        [SerializeField] private bool m_showOffsetDebug = true;
+        [SerializeField] private float m_visualScaleFactor = 2.0f; // Visueller Skalierungsfaktor
+        private Vector3 m_controllerStartPosition;
+        private bool m_isSettingOffset = false;
 
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
@@ -85,9 +130,18 @@ namespace TryAR.MarkerTracking
             //======================================================================================
             InitializeMarkerTracking();
             
+            // Initialisiere den Pink Ball mit den eingestellten HSV-Werten
+            m_pinkBall = new ColorObject("pink");
+            UpdatePinkHSVValues();
+            InitializeBallTracking();
+            
             // Set initial visibility states
             m_cameraCanvas.gameObject.SetActive(m_showCameraCanvas);
             SetMarkerObjectsVisibility(!m_showCameraCanvas);
+            if (m_ballVisualization != null)
+            {
+                m_ballVisualization.SetActive(!m_showCameraCanvas);
+            }
         }
 
         /// <summary>
@@ -122,22 +176,27 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void Update()
         {
-            // Skip if camera or tracking system isn't ready
-            if (m_webCamTextureManager.WebCamTexture == null || !m_arucoMarkerTracking.IsReady)
+            if (m_webCamTextureManager.WebCamTexture == null)
                 return;
 
-            // Toggle between camera view and AR visualization on button press
+            // Toggle zwischen Kamera-Ansicht und AR-Visualisierung
             HandleVisualizationToggle();
-            
-            // Update tracking and visualization
             UpdateCameraPoses();
-            
-            //======================================================================================
-            // CORE FUNCTIONALITY: Process marker detection and positioning of 3D objects
-            // This is where ArUco markers are detected in the camera frame and 3D objects
-            // are positioned in the scene according to marker positions
-            //======================================================================================
-            ProcessMarkerTracking();
+
+            // Verarbeite aktive Tracking-Modi
+            if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
+            {
+                ProcessMarkerTracking();
+                HandleObjectSpawningAndDeletion();
+            }
+
+            if (m_enableColorTracking)
+            {
+                ProcessBallTracking(m_webCamTextureManager.WebCamTexture);
+            }
+
+            // HSV-Werte mit Controller anpassen
+            UpdateHSVControls();
         }
 
         /// <summary>
@@ -149,7 +208,16 @@ namespace TryAR.MarkerTracking
             {
                 m_showCameraCanvas = !m_showCameraCanvas;
                 m_cameraCanvas.gameObject.SetActive(m_showCameraCanvas);
+                
+                // Zeige/Verstecke je nach Modus
+                if (m_enableMarkerTracking)
+                {
                 SetMarkerObjectsVisibility(!m_showCameraCanvas);
+                }
+                if (m_enableColorTracking && m_ballVisualization != null)
+                {
+                    m_ballVisualization.SetActive(!m_showCameraCanvas);
+                }
             }
         }
 
@@ -278,6 +346,337 @@ namespace TryAR.MarkerTracking
             // Position the canvas in front of the camera
             m_cameraCanvas.transform.position = cameraPose.position + cameraPose.rotation * Vector3.forward * m_canvasDistance;
             m_cameraCanvas.transform.rotation = cameraPose.rotation;
+        }
+
+        private void ProcessBallTracking(WebCamTexture webCamTexture)
+        {
+            try
+            {
+                Debug.Log("BallTracking: Starting frame processing...");
+                Debug.Log($"BallTracking: Camera resolution: {webCamTexture.width}x{webCamTexture.height}");
+
+                // Konvertiere WebCamTexture zu Mat
+                Mat rgbaMat = new Mat(webCamTexture.height, webCamTexture.width, CvType.CV_8UC4);
+                Utils.webCamTextureToMat(webCamTexture, rgbaMat);
+                Debug.Log($"BallTracking: Converted to Mat: {rgbaMat.width()}x{rgbaMat.height()}");
+
+                // Konvertiere zu RGB und dann zu HSV
+                Imgproc.cvtColor(rgbaMat, m_rgbMat, Imgproc.COLOR_RGBA2RGB);
+                Imgproc.cvtColor(m_rgbMat, m_hsvMat, Imgproc.COLOR_RGB2HSV);
+                Debug.Log("BallTracking: Converted to HSV color space");
+
+                // Finde pinke Objekte
+                Core.inRange(m_hsvMat, m_pinkBall.getHSVmin(), m_pinkBall.getHSVmax(), m_thresholdMat);
+                Debug.Log($"BallTracking: HSV Range - Min: {m_pinkBall.getHSVmin().val[0]},{m_pinkBall.getHSVmin().val[1]},{m_pinkBall.getHSVmin().val[2]} " +
+                          $"Max: {m_pinkBall.getHSVmax().val[0]},{m_pinkBall.getHSVmax().val[1]},{m_pinkBall.getHSVmax().val[2]}");
+
+                // Morphologische Operationen
+                Mat erodeElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(3, 3));
+                Mat dilateElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(8, 8));
+                
+                Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
+                Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
+                Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
+                Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
+                Debug.Log("BallTracking: Applied morphological operations");
+
+                // Finde Konturen
+                List<MatOfPoint> contours = new List<MatOfPoint>();
+                Mat hierarchy = new Mat();
+                Imgproc.findContours(m_thresholdMat, contours, hierarchy, 
+                    Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+                Debug.Log($"BallTracking: Found {contours.Count} contours");
+
+                // Zeige das Ergebnis im Debug-View
+                if (m_showColorDebugView && m_resultRawImage != null && m_resultRawImage.enabled)
+                {
+                    // Zeige das Schwellenwertbild
+                    if (m_colorDebugTexture == null || 
+                        m_colorDebugTexture.width != m_thresholdMat.width() || 
+                        m_colorDebugTexture.height != m_thresholdMat.height())
+                    {
+                        if (m_colorDebugTexture != null)
+                            Destroy(m_colorDebugTexture);
+                        m_colorDebugTexture = new Texture2D(m_thresholdMat.width(), m_thresholdMat.height(), 
+                            TextureFormat.RGBA32, false);
+                    }
+
+                    // Konvertiere das Schwellenwertbild zu RGBA für die Anzeige
+                    Mat debugMat = new Mat();
+                    Imgproc.cvtColor(m_thresholdMat, debugMat, Imgproc.COLOR_GRAY2RGBA);
+                    
+                    // Zeichne die Konturen
+                    foreach (var contour in contours)
+                    {
+                        Imgproc.drawContours(debugMat, contours, -1, new Scalar(0, 255, 0, 255), 2);
+                    }
+
+                    Utils.matToTexture2D(debugMat, m_colorDebugTexture);
+                    m_resultRawImage.texture = m_colorDebugTexture;  // Verwende die separate Debug-Texture
+                    debugMat.Dispose();
+                }
+
+                double maxArea = 0;
+                Point maxCenter = new Point();
+                double maxRadius = 0;
+
+                // Finde den größten kreisförmigen Blob
+                foreach (var contour in contours)
+                {
+                    double area = Imgproc.contourArea(contour);
+                    if (area > 100) // Minimale Fläche für Rauschunterdrückung
+                    {
+                        Point[] points = contour.toArray();
+                        Point center = new Point();
+                        
+                        // Berechne den Mittelpunkt als Durchschnitt aller Konturpunkte
+                        foreach (Point p in points)
+                        {
+                            center.x += p.x;
+                            center.y += p.y;
+                        }
+                        center.x /= points.Length;
+                        center.y /= points.Length;
+                        
+                        // Berechne den Radius als maximalen Abstand vom Mittelpunkt
+                        double currentRadius = 0;
+                        foreach (Point p in points)
+                        {
+                            double dx = p.x - center.x;
+                            double dy = p.y - center.y;
+                            double distance = Math.Sqrt(dx * dx + dy * dy);
+                            currentRadius = Math.Max(currentRadius, distance);
+                        }
+
+                        Debug.Log($"BallTracking: Found potential ball - Area: {area}, Radius: {currentRadius}");
+
+                        // Wenn dies der bisher größte gefundene Kreis ist
+                        if (area > maxArea)
+                        {
+                            maxArea = area;
+                            maxCenter = center;
+                            maxRadius = currentRadius;
+                        }
+                    }
+                }
+
+                // Wenn ein Ball gefunden wurde
+                if (maxArea > 0)
+                {
+                    Debug.Log($"BallTracking: Detected ball at ({maxCenter.x}, {maxCenter.y}) with radius {maxRadius}");
+
+                    if (m_ballVisualization != null)
+                    {
+                        // Kamera-Intrinsics wie zuvor
+                        var cameraIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
+                        float fx = cameraIntrinsics.FocalLength.x;
+                        float fy = cameraIntrinsics.FocalLength.y;
+                        float cx = cameraIntrinsics.PrincipalPoint.x;
+                        float cy = cameraIntrinsics.PrincipalPoint.y;
+
+                        // Normalisierte Bildkoordinaten
+                        float normalizedX = (float)((maxCenter.x - cx) / fx);
+                        float normalizedY = (float)(-1 * (maxCenter.y - cy) / fy); // Y-Achse invertieren
+                        
+                        // Berechne die Entfernung
+                        float apparentDiameter = (float)(maxRadius * 2.0);
+                        float distance = (fx * m_ballDiameterInMeters) / apparentDiameter;
+
+                        // WICHTIG: Diese Zeile ist der Schlüssel - hole die komplette Kamera-Pose
+                        var cameraPose = PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye);
+                        
+                        // Vektor im lokalen Kamera-Koordinatensystem
+                        Vector3 pointInCameraSpace = new Vector3(
+                            normalizedX * distance,
+                            normalizedY * distance,
+                            distance
+                        );
+                        
+                        // Matrix für Kamera-zu-Welt Transformation erstellen
+                        Matrix4x4 cameraToWorldMatrix = Matrix4x4.TRS(
+                            cameraPose.position,
+                            cameraPose.rotation,
+                            Vector3.one
+                        );
+                        
+                        // Transformiere Punkt mit der Matrix
+                        Vector3 worldPosition = cameraToWorldMatrix.MultiplyPoint3x4(pointInCameraSpace);
+                        
+                        // Offset anwenden
+                        worldPosition += m_ballOffset;
+                        
+                        // Position smoothen
+                        Vector3 currentPos = m_ballVisualization.transform.position;
+                        float smoothFactor = 0.5f;
+                        Vector3 finalPosition = Vector3.Lerp(currentPos, worldPosition, 1 - smoothFactor);
+                        
+                        // Anwenden
+                        m_ballVisualization.transform.position = finalPosition;
+                        m_ballVisualization.transform.localScale = Vector3.one * m_ballDiameterInMeters * m_visualScaleFactor;
+                    }
+                }
+                else
+                {
+                    Debug.Log("BallTracking: No ball detected in this frame");
+                }
+
+                // Aufräumen
+                rgbaMat.Dispose();
+                hierarchy.Dispose();
+                foreach (var contour in contours)
+                    contour.Dispose();
+                erodeElement.Dispose();
+                dilateElement.Dispose();
+
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogError($"BallTracking Error: {e.Message}\n{e.StackTrace}");
+            }
+        }
+
+        private void InitializeBallTracking()
+        {
+            if (m_rgbMat != null) m_rgbMat.Dispose();
+            if (m_hsvMat != null) m_hsvMat.Dispose();
+            if (m_thresholdMat != null) m_thresholdMat.Dispose();
+
+            m_rgbMat = new Mat();
+            m_hsvMat = new Mat();
+            m_thresholdMat = new Mat();
+        }
+
+        private void UpdatePinkHSVValues()
+        {
+            if (m_pinkBall != null)
+            {
+                m_pinkBall.setHSVRanges(m_pinkHSVMin, m_pinkHSVMax);
+            }
+        }
+
+        private void UpdateHSVControls()
+        {
+            Vector2 leftStick = OVRInput.Get(OVRInput.Axis2D.PrimaryThumbstick);
+            Vector2 rightStick = OVRInput.Get(OVRInput.Axis2D.SecondaryThumbstick);
+            bool leftTrigger = OVRInput.Get(OVRInput.Button.PrimaryIndexTrigger);
+            bool rightTrigger = OVRInput.Get(OVRInput.Button.SecondaryIndexTrigger);
+            bool leftGrip = OVRInput.Get(OVRInput.Button.PrimaryHandTrigger);
+
+            // Linker Stick: Hue Min/Max
+            if (Mathf.Abs(leftStick.x) > 0.1f)
+            {
+                // X-Achse: Hue Minimum
+                m_pinkHSVMin.x = Mathf.Clamp(m_pinkHSVMin.x + leftStick.x * m_hsvAdjustSpeed, 0, 180);
+            }
+            if (Mathf.Abs(leftStick.y) > 0.1f)
+            {
+                // Y-Achse: Hue Maximum
+                m_pinkHSVMax.x = Mathf.Clamp(m_pinkHSVMax.x + leftStick.y * m_hsvAdjustSpeed, 0, 180);
+            }
+
+            // Rechter Stick: Saturation Min/Max (wenn linker Trigger) oder Value Min/Max (wenn rechter Trigger)
+            if (leftTrigger)
+            {
+                // Saturation anpassen
+                if (Mathf.Abs(rightStick.x) > 0.1f)
+                {
+                    // X-Achse: Saturation Minimum
+                    m_pinkHSVMin.y = Mathf.Clamp(m_pinkHSVMin.y + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
+                }
+                if (Mathf.Abs(rightStick.y) > 0.1f)
+                {
+                    // Y-Achse: Saturation Maximum
+                    m_pinkHSVMax.y = Mathf.Clamp(m_pinkHSVMax.y + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
+                }
+            }
+            else if (rightTrigger)
+            {
+                // Value anpassen
+                if (Mathf.Abs(rightStick.x) > 0.1f)
+                {
+                    // X-Achse: Value Minimum
+                    m_pinkHSVMin.z = Mathf.Clamp(m_pinkHSVMin.z + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
+                }
+                if (Mathf.Abs(rightStick.y) > 0.1f)
+                {
+                    // Y-Achse: Value Maximum
+                    m_pinkHSVMax.z = Mathf.Clamp(m_pinkHSVMax.z + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
+                }
+            }
+
+            // Offset-Kontrolle mit Grip-Button
+            if (leftGrip)
+            {
+                // X/Y Offset mit rechtem Stick
+                if (Mathf.Abs(rightStick.x) > 0.1f)
+                    m_ballOffset.x += rightStick.x * m_hsvAdjustSpeed;
+                if (Mathf.Abs(rightStick.y) > 0.1f)
+                    m_ballOffset.y += rightStick.y * m_hsvAdjustSpeed;
+
+                // Z Offset mit Triggern
+                if (leftTrigger)
+                    m_ballOffset.z += m_hsvAdjustSpeed;
+                if (rightTrigger)
+                    m_ballOffset.z -= m_hsvAdjustSpeed;
+
+                if (m_showHSVDebug)
+                    Debug.Log($"Ball Offset: {m_ballOffset}");
+            }
+
+            // Offset-Kontrolle mit beiden Triggern
+            if (leftTrigger && rightTrigger)
+            {
+                // Hole die Position des rechten Controllers
+                Vector3 controllerPosition = OVRInput.GetLocalControllerPosition(OVRInput.Controller.RTouch);
+
+                if (!m_isSettingOffset)
+                {
+                    // Starte Offset-Einstellung
+                    m_isSettingOffset = true;
+                    m_controllerStartPosition = controllerPosition;
+                    if (m_showOffsetDebug)
+                        Debug.Log("Started offset adjustment");
+                }
+                else
+                {
+                    // Berechne Offset basierend auf Controller-Bewegung
+                    m_ballOffset = controllerPosition - m_controllerStartPosition;
+                    
+                    if (m_showOffsetDebug)
+                        Debug.Log($"Ball Offset: {m_ballOffset}");
+                }
+            }
+            else if (m_isSettingOffset)
+            {
+                // Beende Offset-Einstellung
+                m_isSettingOffset = false;
+                if (m_showOffsetDebug)
+                    Debug.Log("Finished offset adjustment");
+            }
+
+            // Aktualisiere die Werte im ColorObject
+            UpdatePinkHSVValues();
+
+            // Debug-Ausgabe der aktuellen Werte
+            if (m_showHSVDebug)
+            {
+                Debug.Log($"HSV Min: H({m_pinkHSVMin.x:F1}) S({m_pinkHSVMin.y:F1}) V({m_pinkHSVMin.z:F1})");
+                Debug.Log($"HSV Max: H({m_pinkHSVMax.x:F1}) S({m_pinkHSVMax.y:F1}) V({m_pinkHSVMax.z:F1})");
+            }
+        }
+
+        private void OnDestroy()
+        {
+            // Cleanup für Ball-Tracking Ressourcen
+            if (m_rgbMat != null) m_rgbMat.Dispose();
+            if (m_hsvMat != null) m_hsvMat.Dispose();
+            if (m_thresholdMat != null) m_thresholdMat.Dispose();
+            
+            // Cleanup für Texturen
+            if (m_resultTexture != null)
+                Destroy(m_resultTexture);
+            if (m_colorDebugTexture != null)
+                Destroy(m_colorDebugTexture);
         }
     }
 }
