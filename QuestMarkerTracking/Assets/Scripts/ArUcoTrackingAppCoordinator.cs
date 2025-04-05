@@ -187,7 +187,7 @@ namespace TryAR.MarkerTracking
             if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
             {
                 ProcessMarkerTracking();
-                HandleObjectSpawningAndDeletion();
+               // HandleObjectSpawningAndDeletion();
             }
 
             if (m_enableColorTracking)
