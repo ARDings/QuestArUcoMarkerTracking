@@ -39,6 +39,26 @@ namespace TryAR.MarkerTracking
             public GameObject gameObject;
         }
 
+        [System.Serializable]
+        public enum TrackingColorPreset
+        {
+            Pink,
+            NeonGelb,
+            Rot,
+            Grün,
+            Blau,
+            Orange,
+            Lila
+        }
+
+        [System.Serializable]
+        public class ColorPresetValues
+        {
+            public TrackingColorPreset colorPreset;
+            public Vector3 hsvMin;
+            public Vector3 hsvMax;
+        }
+
         [Header("Camera Texture View")]
         [SerializeField] private WebCamTextureManager m_webCamTextureManager;
         private PassthroughCameraEye CameraEye => m_webCamTextureManager.Eye;
@@ -77,11 +97,15 @@ namespace TryAR.MarkerTracking
         private float m_ballDiameterInMeters = 0.1f; // 10cm Standard
         [SerializeField] private GameObject m_ballVisualization;
 
-        [Header("Pink Ball HSV Settings")]
+        [Header("Color Tracking Settings")]
+        [SerializeField] private TrackingColorPreset m_selectedColorPreset = TrackingColorPreset.Pink;
+        [SerializeField] private List<ColorPresetValues> m_colorPresets = new List<ColorPresetValues>();
         [SerializeField, Tooltip("HSV Minimum Werte (H: 0-180, S: 0-255, V: 0-255)")]
-        private Vector3 m_pinkHSVMin = new Vector3(140, 50, 150);  // Helleres Pink, weniger Sättigung
+        private Vector3 m_currentHSVMin = new Vector3(140, 50, 150);
         [SerializeField, Tooltip("HSV Maximum Werte (H: 0-180, S: 0-255, V: 0-255)")]
-        private Vector3 m_pinkHSVMax = new Vector3(175, 255, 255);  // Breiterer Farbbereich für verschiedene Lichtverhältnisse
+        private Vector3 m_currentHSVMax = new Vector3(175, 255, 255);
+        [SerializeField] private bool m_showColorPresetEditor = true;
+        private TrackingColorPreset m_lastSelectedPreset;
 
         private ColorObject m_pinkBall;
         private Mat m_rgbMat;
@@ -142,6 +166,8 @@ namespace TryAR.MarkerTracking
             {
                 m_ballVisualization.SetActive(!m_showCameraCanvas);
             }
+
+            InitializeColorPresets();
         }
 
         /// <summary>
@@ -197,6 +223,13 @@ namespace TryAR.MarkerTracking
 
             // HSV-Werte mit Controller anpassen
             UpdateHSVControls();
+
+            // Überprüfe, ob sich die ausgewählte Farbe geändert hat
+            if (m_lastSelectedPreset != m_selectedColorPreset)
+            {
+                UpdateHSVFromPreset();
+                m_lastSelectedPreset = m_selectedColorPreset;
+            }
         }
 
         /// <summary>
@@ -550,7 +583,7 @@ namespace TryAR.MarkerTracking
         {
             if (m_pinkBall != null)
             {
-                m_pinkBall.setHSVRanges(m_pinkHSVMin, m_pinkHSVMax);
+                m_pinkBall.setHSVRanges(m_currentHSVMin, m_currentHSVMax);
             }
         }
 
@@ -566,12 +599,12 @@ namespace TryAR.MarkerTracking
             if (Mathf.Abs(leftStick.x) > 0.1f)
             {
                 // X-Achse: Hue Minimum
-                m_pinkHSVMin.x = Mathf.Clamp(m_pinkHSVMin.x + leftStick.x * m_hsvAdjustSpeed, 0, 180);
+                m_currentHSVMin.x = Mathf.Clamp(m_currentHSVMin.x + leftStick.x * m_hsvAdjustSpeed, 0, 180);
             }
             if (Mathf.Abs(leftStick.y) > 0.1f)
             {
                 // Y-Achse: Hue Maximum
-                m_pinkHSVMax.x = Mathf.Clamp(m_pinkHSVMax.x + leftStick.y * m_hsvAdjustSpeed, 0, 180);
+                m_currentHSVMin.x = Mathf.Clamp(m_currentHSVMin.x + leftStick.y * m_hsvAdjustSpeed, 0, 180);
             }
 
             // Rechter Stick: Saturation Min/Max (wenn linker Trigger) oder Value Min/Max (wenn rechter Trigger)
@@ -581,12 +614,12 @@ namespace TryAR.MarkerTracking
                 if (Mathf.Abs(rightStick.x) > 0.1f)
                 {
                     // X-Achse: Saturation Minimum
-                    m_pinkHSVMin.y = Mathf.Clamp(m_pinkHSVMin.y + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_currentHSVMin.y = Mathf.Clamp(m_currentHSVMin.y + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
                 }
                 if (Mathf.Abs(rightStick.y) > 0.1f)
                 {
                     // Y-Achse: Saturation Maximum
-                    m_pinkHSVMax.y = Mathf.Clamp(m_pinkHSVMax.y + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_currentHSVMin.y = Mathf.Clamp(m_currentHSVMin.y + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
                 }
             }
             else if (rightTrigger)
@@ -595,12 +628,12 @@ namespace TryAR.MarkerTracking
                 if (Mathf.Abs(rightStick.x) > 0.1f)
                 {
                     // X-Achse: Value Minimum
-                    m_pinkHSVMin.z = Mathf.Clamp(m_pinkHSVMin.z + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_currentHSVMin.z = Mathf.Clamp(m_currentHSVMin.z + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
                 }
                 if (Mathf.Abs(rightStick.y) > 0.1f)
                 {
                     // Y-Achse: Value Maximum
-                    m_pinkHSVMax.z = Mathf.Clamp(m_pinkHSVMax.z + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_currentHSVMin.z = Mathf.Clamp(m_currentHSVMin.z + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
                 }
             }
 
@@ -660,8 +693,102 @@ namespace TryAR.MarkerTracking
             // Debug-Ausgabe der aktuellen Werte
             if (m_showHSVDebug)
             {
-                Debug.Log($"HSV Min: H({m_pinkHSVMin.x:F1}) S({m_pinkHSVMin.y:F1}) V({m_pinkHSVMin.z:F1})");
-                Debug.Log($"HSV Max: H({m_pinkHSVMax.x:F1}) S({m_pinkHSVMax.y:F1}) V({m_pinkHSVMax.z:F1})");
+                Debug.Log($"HSV Min: H({m_currentHSVMin.x:F1}) S({m_currentHSVMin.y:F1}) V({m_currentHSVMin.z:F1})");
+                Debug.Log($"HSV Max: H({m_currentHSVMin.x:F1}) S({m_currentHSVMin.y:F1}) V({m_currentHSVMin.z:F1})");
+            }
+        }
+
+        private void InitializeColorPresets()
+        {
+            // Nur initialisieren, wenn die Liste leer ist
+            if (m_colorPresets.Count == 0)
+            {
+                // Pink
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.Pink,
+                    hsvMin = new Vector3(140, 50, 150),
+                    hsvMax = new Vector3(175, 255, 255)
+                });
+
+                // Neon Gelb
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.NeonGelb,
+                    hsvMin = new Vector3(20, 100, 200),
+                    hsvMax = new Vector3(40, 255, 255)
+                });
+
+                // Rot
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.Rot,
+                    hsvMin = new Vector3(0, 100, 100),
+                    hsvMax = new Vector3(10, 255, 255)
+                });
+
+                // Grün
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.Grün,
+                    hsvMin = new Vector3(45, 100, 100),
+                    hsvMax = new Vector3(75, 255, 255)
+                });
+
+                // Blau
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.Blau,
+                    hsvMin = new Vector3(100, 100, 100),
+                    hsvMax = new Vector3(130, 255, 255)
+                });
+
+                // Orange
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.Orange,
+                    hsvMin = new Vector3(10, 100, 200),
+                    hsvMax = new Vector3(25, 255, 255)
+                });
+
+                // Lila
+                m_colorPresets.Add(new ColorPresetValues
+                {
+                    colorPreset = TrackingColorPreset.Lila,
+                    hsvMin = new Vector3(125, 50, 100),
+                    hsvMax = new Vector3(150, 255, 255)
+                });
+            }
+
+            // Setze die aktuellen HSV-Werte basierend auf der ausgewählten Farbe
+            UpdateHSVFromPreset();
+            m_lastSelectedPreset = m_selectedColorPreset;
+        }
+
+        private void UpdateHSVFromPreset()
+        {
+            foreach (var preset in m_colorPresets)
+            {
+                if (preset.colorPreset == m_selectedColorPreset)
+                {
+                    m_currentHSVMin = preset.hsvMin;
+                    m_currentHSVMax = preset.hsvMax;
+                    
+                    // Aktualisiere auch die Werte im ColorObject
+                    if (m_pinkBall != null)
+                    {
+                        m_pinkBall.setHSVRanges(m_currentHSVMin, m_currentHSVMax);
+                    }
+                    
+                    if (m_showHSVDebug)
+                    {
+                        Debug.Log($"Farbpreset gewechselt zu {m_selectedColorPreset}");
+                        Debug.Log($"Neue HSV-Werte: Min({m_currentHSVMin.x}, {m_currentHSVMin.y}, {m_currentHSVMin.z}), " +
+                                  $"Max({m_currentHSVMax.x}, {m_currentHSVMax.y}, {m_currentHSVMax.z})");
+                    }
+                    
+                    break;
+                }
             }
         }
 
