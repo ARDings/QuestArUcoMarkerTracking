@@ -39,26 +39,6 @@ namespace TryAR.MarkerTracking
             public GameObject gameObject;
         }
 
-        [System.Serializable]
-        public enum TrackingColorPreset
-        {
-            Pink,
-            NeonGelb,
-            Rot,
-            Grün,
-            Blau,
-            Orange,
-            Lila
-        }
-
-        [System.Serializable]
-        public class ColorPresetValues
-        {
-            public TrackingColorPreset colorPreset;
-            public Vector3 hsvMin;
-            public Vector3 hsvMax;
-        }
-
         [Header("Camera Texture View")]
         [SerializeField] private WebCamTextureManager m_webCamTextureManager;
         private PassthroughCameraEye CameraEye => m_webCamTextureManager.Eye;
@@ -97,15 +77,11 @@ namespace TryAR.MarkerTracking
         private float m_ballDiameterInMeters = 0.1f; // 10cm Standard
         [SerializeField] private GameObject m_ballVisualization;
 
-        [Header("Color Tracking Settings")]
-        [SerializeField] private TrackingColorPreset m_selectedColorPreset = TrackingColorPreset.Pink;
-        [SerializeField] private List<ColorPresetValues> m_colorPresets = new List<ColorPresetValues>();
+        [Header("Pink Ball HSV Settings")]
         [SerializeField, Tooltip("HSV Minimum Werte (H: 0-180, S: 0-255, V: 0-255)")]
-        private Vector3 m_currentHSVMin = new Vector3(140, 50, 150);
+        private Vector3 m_pinkHSVMin = new Vector3(140, 50, 150);  // Helleres Pink, weniger Sättigung
         [SerializeField, Tooltip("HSV Maximum Werte (H: 0-180, S: 0-255, V: 0-255)")]
-        private Vector3 m_currentHSVMax = new Vector3(175, 255, 255);
-        [SerializeField] private bool m_showColorPresetEditor = true;
-        private TrackingColorPreset m_lastSelectedPreset;
+        private Vector3 m_pinkHSVMax = new Vector3(175, 255, 255);  // Breiterer Farbbereich für verschiedene Lichtverhältnisse
 
         private ColorObject m_pinkBall;
         private Mat m_rgbMat;
@@ -122,6 +98,9 @@ namespace TryAR.MarkerTracking
         [SerializeField] private float m_visualScaleFactor = 2.0f; // Visueller Skalierungsfaktor
         private Vector3 m_controllerStartPosition;
         private bool m_isSettingOffset = false;
+
+        [Header("Performance Settings")]
+        [SerializeField] private int m_processingDivider = 2;
 
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
@@ -166,8 +145,6 @@ namespace TryAR.MarkerTracking
             {
                 m_ballVisualization.SetActive(!m_showCameraCanvas);
             }
-
-            InitializeColorPresets();
         }
 
         /// <summary>
@@ -186,15 +163,29 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private IEnumerator InitializeCamera()
         {
-            // Set the resolution and enable the camera manager
-            m_webCamTextureManager.RequestedResolution = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye).Resolution;
+            // Hole die native Auflösung
+            var nativeResolution = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye).Resolution;
+            
+            // Reduziere die angeforderte Auflösung mit m_processingDivider
+            Vector2Int requestedResolution = new Vector2Int(
+                nativeResolution.x / m_processingDivider,
+                nativeResolution.y / m_processingDivider
+            );
+
+            Debug.Log($"Requesting camera resolution: {requestedResolution.x}x{requestedResolution.y} " +
+                      $"(native: {nativeResolution.x}x{nativeResolution.y})");
+
+            // Setze die reduzierte Auflösung
+            m_webCamTextureManager.RequestedResolution = requestedResolution;
             m_webCamTextureManager.enabled = true;
 
-            // Wait until the camera texture is available
+            // Warte bis die Kamera-Textur verfügbar ist
             while(m_webCamTextureManager.WebCamTexture == null)
             {
                 yield return null;
             }
+
+            Debug.Log($"Actual camera resolution: {m_webCamTextureManager.WebCamTexture.width}x{m_webCamTextureManager.WebCamTexture.height}");
         }
 
         /// <summary>
@@ -223,13 +214,6 @@ namespace TryAR.MarkerTracking
 
             // HSV-Werte mit Controller anpassen
             UpdateHSVControls();
-
-            // Überprüfe, ob sich die ausgewählte Farbe geändert hat
-            if (m_lastSelectedPreset != m_selectedColorPreset)
-            {
-                UpdateHSVFromPreset();
-                m_lastSelectedPreset = m_selectedColorPreset;
-            }
         }
 
         /// <summary>
@@ -296,17 +280,17 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void InitializeMarkerTracking()
         {
-            // Step 1: Set up camera parameters for tracking
-            // These intrinsic parameters are essential for accurate marker pose estimation
-            var intrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
-            var cx = intrinsics.PrincipalPoint.x;  // Principal point X (optical center)
-            var cy = intrinsics.PrincipalPoint.y;  // Principal point Y (optical center)
-            var fx = intrinsics.FocalLength.x;     // Focal length X
-            var fy = intrinsics.FocalLength.y;     // Focal length Y
-            var width = intrinsics.Resolution.x;   // Image width
-            var height = intrinsics.Resolution.y;  // Image height
+            var nativeIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
             
-            // Initialize the ArUco tracking with camera parameters
+            // Skaliere die Kamera-Parameter mit m_processingDivider
+            var cx = nativeIntrinsics.PrincipalPoint.x / m_processingDivider;
+            var cy = nativeIntrinsics.PrincipalPoint.y / m_processingDivider;
+            var fx = nativeIntrinsics.FocalLength.x / m_processingDivider;
+            var fy = nativeIntrinsics.FocalLength.y / m_processingDivider;
+            var width = nativeIntrinsics.Resolution.x / m_processingDivider;
+            var height = nativeIntrinsics.Resolution.y / m_processingDivider;
+            
+            // Initialisiere ArUco mit skalierten Parametern
             m_arucoMarkerTracking.Initialize(width, height, cx, cy, fx, fy);
             
             // Step 2: Build marker dictionary from serialized list
@@ -500,19 +484,24 @@ namespace TryAR.MarkerTracking
 
                     if (m_ballVisualization != null)
                     {
-                        // Kamera-Intrinsics wie zuvor
+                        // WICHTIG: Hole die ORIGINALEN Kamera-Parameter, nicht die skalierten
                         var cameraIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
-                        float fx = cameraIntrinsics.FocalLength.x;
-                        float fy = cameraIntrinsics.FocalLength.y;
-                        float cx = cameraIntrinsics.PrincipalPoint.x;
-                        float cy = cameraIntrinsics.PrincipalPoint.y;
+                        float fx = cameraIntrinsics.FocalLength.x;  // Originale Focal Length
+                        float fy = cameraIntrinsics.FocalLength.y;  // Originale Focal Length
+                        float cx = cameraIntrinsics.PrincipalPoint.x;  // Originaler Principal Point
+                        float cy = cameraIntrinsics.PrincipalPoint.y;  // Originaler Principal Point
 
-                        // Normalisierte Bildkoordinaten
-                        float normalizedX = (float)((maxCenter.x - cx) / fx);
-                        float normalizedY = (float)(-1 * (maxCenter.y - cy) / fy); // Y-Achse invertieren
-                        
-                        // Berechne die Entfernung
-                        float apparentDiameter = (float)(maxRadius * 2.0);
+                        // Skaliere die gefundenen Koordinaten HOCH zur originalen Auflösung
+                        float scaledX = (float)maxCenter.x * m_processingDivider;
+                        float scaledY = (float)maxCenter.y * m_processingDivider;
+
+                        // Berechne normalisierte Koordinaten mit originalen Parametern
+                        float normalizedX = (float)((scaledX - cx) / fx);
+                        float normalizedY = (float)(-1 * (scaledY - cy) / fy);
+
+                        // Skaliere auch den Radius hoch
+                        float scaledRadius = (float)maxRadius * m_processingDivider;
+                        float apparentDiameter = scaledRadius * 2.0f;
                         float distance = (fx * m_ballDiameterInMeters) / apparentDiameter;
 
                         // WICHTIG: Diese Zeile ist der Schlüssel - hole die komplette Kamera-Pose
@@ -583,7 +572,7 @@ namespace TryAR.MarkerTracking
         {
             if (m_pinkBall != null)
             {
-                m_pinkBall.setHSVRanges(m_currentHSVMin, m_currentHSVMax);
+                m_pinkBall.setHSVRanges(m_pinkHSVMin, m_pinkHSVMax);
             }
         }
 
@@ -599,12 +588,12 @@ namespace TryAR.MarkerTracking
             if (Mathf.Abs(leftStick.x) > 0.1f)
             {
                 // X-Achse: Hue Minimum
-                m_currentHSVMin.x = Mathf.Clamp(m_currentHSVMin.x + leftStick.x * m_hsvAdjustSpeed, 0, 180);
+                m_pinkHSVMin.x = Mathf.Clamp(m_pinkHSVMin.x + leftStick.x * m_hsvAdjustSpeed, 0, 180);
             }
             if (Mathf.Abs(leftStick.y) > 0.1f)
             {
                 // Y-Achse: Hue Maximum
-                m_currentHSVMin.x = Mathf.Clamp(m_currentHSVMin.x + leftStick.y * m_hsvAdjustSpeed, 0, 180);
+                m_pinkHSVMax.x = Mathf.Clamp(m_pinkHSVMax.x + leftStick.y * m_hsvAdjustSpeed, 0, 180);
             }
 
             // Rechter Stick: Saturation Min/Max (wenn linker Trigger) oder Value Min/Max (wenn rechter Trigger)
@@ -614,12 +603,12 @@ namespace TryAR.MarkerTracking
                 if (Mathf.Abs(rightStick.x) > 0.1f)
                 {
                     // X-Achse: Saturation Minimum
-                    m_currentHSVMin.y = Mathf.Clamp(m_currentHSVMin.y + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_pinkHSVMin.y = Mathf.Clamp(m_pinkHSVMin.y + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
                 }
                 if (Mathf.Abs(rightStick.y) > 0.1f)
                 {
                     // Y-Achse: Saturation Maximum
-                    m_currentHSVMin.y = Mathf.Clamp(m_currentHSVMin.y + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_pinkHSVMax.y = Mathf.Clamp(m_pinkHSVMax.y + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
                 }
             }
             else if (rightTrigger)
@@ -628,12 +617,12 @@ namespace TryAR.MarkerTracking
                 if (Mathf.Abs(rightStick.x) > 0.1f)
                 {
                     // X-Achse: Value Minimum
-                    m_currentHSVMin.z = Mathf.Clamp(m_currentHSVMin.z + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_pinkHSVMin.z = Mathf.Clamp(m_pinkHSVMin.z + rightStick.x * m_hsvAdjustSpeed * 2, 0, 255);
                 }
                 if (Mathf.Abs(rightStick.y) > 0.1f)
                 {
                     // Y-Achse: Value Maximum
-                    m_currentHSVMin.z = Mathf.Clamp(m_currentHSVMin.z + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
+                    m_pinkHSVMax.z = Mathf.Clamp(m_pinkHSVMax.z + rightStick.y * m_hsvAdjustSpeed * 2, 0, 255);
                 }
             }
 
@@ -693,102 +682,8 @@ namespace TryAR.MarkerTracking
             // Debug-Ausgabe der aktuellen Werte
             if (m_showHSVDebug)
             {
-                Debug.Log($"HSV Min: H({m_currentHSVMin.x:F1}) S({m_currentHSVMin.y:F1}) V({m_currentHSVMin.z:F1})");
-                Debug.Log($"HSV Max: H({m_currentHSVMin.x:F1}) S({m_currentHSVMin.y:F1}) V({m_currentHSVMin.z:F1})");
-            }
-        }
-
-        private void InitializeColorPresets()
-        {
-            // Nur initialisieren, wenn die Liste leer ist
-            if (m_colorPresets.Count == 0)
-            {
-                // Pink
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.Pink,
-                    hsvMin = new Vector3(140, 50, 150),
-                    hsvMax = new Vector3(175, 255, 255)
-                });
-
-                // Neon Gelb
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.NeonGelb,
-                    hsvMin = new Vector3(20, 100, 200),
-                    hsvMax = new Vector3(40, 255, 255)
-                });
-
-                // Rot
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.Rot,
-                    hsvMin = new Vector3(0, 100, 100),
-                    hsvMax = new Vector3(10, 255, 255)
-                });
-
-                // Grün
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.Grün,
-                    hsvMin = new Vector3(45, 100, 100),
-                    hsvMax = new Vector3(75, 255, 255)
-                });
-
-                // Blau
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.Blau,
-                    hsvMin = new Vector3(100, 100, 100),
-                    hsvMax = new Vector3(130, 255, 255)
-                });
-
-                // Orange
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.Orange,
-                    hsvMin = new Vector3(10, 100, 200),
-                    hsvMax = new Vector3(25, 255, 255)
-                });
-
-                // Lila
-                m_colorPresets.Add(new ColorPresetValues
-                {
-                    colorPreset = TrackingColorPreset.Lila,
-                    hsvMin = new Vector3(125, 50, 100),
-                    hsvMax = new Vector3(150, 255, 255)
-                });
-            }
-
-            // Setze die aktuellen HSV-Werte basierend auf der ausgewählten Farbe
-            UpdateHSVFromPreset();
-            m_lastSelectedPreset = m_selectedColorPreset;
-        }
-
-        private void UpdateHSVFromPreset()
-        {
-            foreach (var preset in m_colorPresets)
-            {
-                if (preset.colorPreset == m_selectedColorPreset)
-                {
-                    m_currentHSVMin = preset.hsvMin;
-                    m_currentHSVMax = preset.hsvMax;
-                    
-                    // Aktualisiere auch die Werte im ColorObject
-                    if (m_pinkBall != null)
-                    {
-                        m_pinkBall.setHSVRanges(m_currentHSVMin, m_currentHSVMax);
-                    }
-                    
-                    if (m_showHSVDebug)
-                    {
-                        Debug.Log($"Farbpreset gewechselt zu {m_selectedColorPreset}");
-                        Debug.Log($"Neue HSV-Werte: Min({m_currentHSVMin.x}, {m_currentHSVMin.y}, {m_currentHSVMin.z}), " +
-                                  $"Max({m_currentHSVMax.x}, {m_currentHSVMax.y}, {m_currentHSVMax.z})");
-                    }
-                    
-                    break;
-                }
+                Debug.Log($"HSV Min: H({m_pinkHSVMin.x:F1}) S({m_pinkHSVMin.y:F1}) V({m_pinkHSVMin.z:F1})");
+                Debug.Log($"HSV Max: H({m_pinkHSVMax.x:F1}) S({m_pinkHSVMax.y:F1}) V({m_pinkHSVMax.z:F1})");
             }
         }
 

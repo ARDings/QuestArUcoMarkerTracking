@@ -4,7 +4,7 @@ using System.Collections;
 public class DroneAI : MonoBehaviour
 {
     public Transform userHead;
-    public float orbitSpeed = 20f;
+    public float orbitSpeed = 10f;
     public float orbitRadius = 2f;
     public float updateTargetDelay = 2f;
     public float shootInterval = 10f;
@@ -52,7 +52,14 @@ public class DroneAI : MonoBehaviour
         targetPos.y = cachedUserPosition.y;
 
         transform.position = Vector3.Lerp(transform.position, targetPos, Time.deltaTime * 2f);
-        transform.LookAt(cachedUserPosition);
+        
+        // Berechnung der Rotation mit zusätzlichen Winkeln
+        Vector3 directionToCamera = (cachedUserPosition - transform.position).normalized;
+        directionToCamera.y = 0;
+        Quaternion baseRotation = Quaternion.LookRotation(-directionToCamera);
+        
+        // Kombiniere die Rotationen: erst Basis, dann Z-Rotation, dann Y-Rotation
+        transform.rotation = baseRotation * Quaternion.Euler(0, 70, 90);
     }
 
     IEnumerator UpdateTargetPosition()
@@ -128,9 +135,14 @@ public class DroneAI : MonoBehaviour
 
             Rigidbody rb = child.gameObject.AddComponent<Rigidbody>();
             rb.mass = 0.01f;
-            rb.AddExplosionForce(2f, transform.position, 1f);
+            
+            // Stärkere Explosionskraft und größerer Radius für mehr Teilchen-Streuung
+            rb.AddExplosionForce(10f, transform.position, 3f);
+            
+     
 
-            // Voxel bleibt dauerhaft liegen
+            // Optional: Zerstöre die Voxel nach einiger Zeit
+            Destroy(child.gameObject, Random.Range(2f, 4f));
         }
 
         Destroy(gameObject); // Drohne selbst zerstören

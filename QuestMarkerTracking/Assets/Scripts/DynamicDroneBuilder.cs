@@ -2,60 +2,72 @@ using UnityEngine;
 
 public class DynamicDroneBuilder : MonoBehaviour
 {
-    public float radius = 0.3f;
-    public float cubeSize = 0.05f;
-    public float density = 1f;
-    public Material droneMaterial;
-    public AudioClip droneDestroySound;
+    public float voxelSize = 0.1f;
+    public Material voxelMaterial;
+    public AudioClip destroySound;
+    
+    private Color centerColor = Color.red;
+    private Color middleRingColor = Color.yellow;
+    private Color outerRingColor = Color.green;
+    
+    private float spacing = 0.05f; // Abstand zwischen den Ringen
 
     public GameObject BuildDrone()
     {
-        GameObject drone = new GameObject("VoxelDrone");
-        Rigidbody rb = drone.AddComponent<Rigidbody>();
-        rb.isKinematic = true;
-
-        SphereCollider sc = drone.AddComponent<SphereCollider>();
-        sc.isTrigger = true;
-
+        GameObject drone = new GameObject("TargetDrone");
         DroneAI ai = drone.AddComponent<DroneAI>();
+        ai.destroySound = destroySound;
         ai.userHead = Camera.main.transform;
-        ai.orbitRadius = Random.Range(1.5f, 3.5f);
-        ai.orbitSpeed = Random.Range(15f, 45f);
-        ai.destroySound = droneDestroySound;
-
-        for (float x = -radius; x <= radius; x += cubeSize * density)
-        {
-            for (float y = -radius; y <= radius; y += cubeSize * density)
-            {
-                for (float z = -radius; z <= radius; z += cubeSize * density)
-                {
-                    Vector3 pos = new Vector3(x, y, z);
-                    if (pos.magnitude <= radius)
-                    {
-                        GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                        cube.transform.SetParent(drone.transform);
-                        cube.transform.localPosition = pos;
-                        cube.transform.localScale = Vector3.one * cubeSize;
-                        Destroy(cube.GetComponent<Collider>());
-
-                        if (droneMaterial != null)
-                        {
-                            var baseColor = droneMaterial.color;
-                            float variance = 0.1f;
-                            Color variedColor = new Color(
-                                Mathf.Clamp01(baseColor.r + Random.Range(-variance, variance)),
-                                Mathf.Clamp01(baseColor.g + Random.Range(-variance, variance)),
-                                Mathf.Clamp01(baseColor.b + Random.Range(-variance, variance))
-                            );
-                            Material newMat = new Material(droneMaterial);
-                            newMat.color = variedColor;
-                            cube.GetComponent<Renderer>().material = newMat;
-                        }
-                    }
-                }
-            }
-        }
+        
+        // Äußerer Ring (grün)
+        CreateRing(drone.transform, 16, 0.5f, outerRingColor);
+        
+        // Mittlerer Ring (gelb)
+        CreateRing(drone.transform, 8, 0.3f, middleRingColor);
+        
+        // Zentrum (rot)
+        CreateRing(drone.transform, 4, 0.15f, centerColor);
+        
+        // Füge einen Collider für die Schwerterkennnung hinzu
+        SphereCollider collider = drone.AddComponent<SphereCollider>();
+        collider.radius = 0.5f;
+        collider.isTrigger = true;
 
         return drone;
+    }
+    
+    private void CreateRing(Transform parent, int voxelCount, float radius, Color color)
+    {
+        float angleStep = 360f / voxelCount;
+        
+        for (int i = 0; i < voxelCount; i++)
+        {
+            float angle = i * angleStep;
+            float rad = angle * Mathf.Deg2Rad;
+            
+            Vector3 position = new Vector3(
+                Mathf.Cos(rad) * radius,
+                0,
+                Mathf.Sin(rad) * radius
+            );
+            
+            CreateVoxel(parent, position, color);
+            
+            // Wenn es das Zentrum ist, erstelle nur einen Voxel
+            if (voxelCount == 1) break;
+        }
+    }
+    
+    private void CreateVoxel(Transform parent, Vector3 localPosition, Color color)
+    {
+        GameObject voxel = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        voxel.transform.SetParent(parent);
+        voxel.transform.localPosition = localPosition;
+        voxel.transform.localScale = Vector3.one * voxelSize;
+        
+        // Material zuweisen und Farbe setzen
+        MeshRenderer renderer = voxel.GetComponent<MeshRenderer>();
+        renderer.material = new Material(voxelMaterial);
+        renderer.material.color = color;
     }
 }

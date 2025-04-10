@@ -235,6 +235,13 @@
       },
       "url": "https://packages.unity.com"
     },
+    "com.yasirkula.nativecamera": {
+      "version": "https://github.com/yasirkula/UnityNativeCamera.git",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {},
+      "hash": "07a681782775760a112a747cd871053bb8f69c77"
+    },
     "com.unity.modules.accessibility": {
       "version": "1.0.0",
       "depth": 0,
