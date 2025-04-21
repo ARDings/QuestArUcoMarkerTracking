@@ -14,6 +14,7 @@ namespace TryAR.Camera
         private static AndroidJavaObject _activity;
         private static ImageAvailableCallback _imageCallback;
         private static bool _isInitialized;
+        private static bool _isCameraRunning;
 
         // Callback delegate for image data
         public delegate void ImageAvailableCallback(byte[] data, int width, int height);
@@ -52,9 +53,10 @@ namespace TryAR.Camera
             }
         }
 
-        public static void Initialize(int width, int height, bool useFrontCamera = false)
+        // Initialisiere die Kamera mit der angegebenen Auflösung und Kamera-ID
+        public static void Initialize(int width, int height, PassthroughCameraEye eye = PassthroughCameraEye.Left)
         {
-            if (_isInitialized) 
+            if (_isInitialized)
             {
                 Debug.Log("[Camera2Helper] Already initialized, reinitializing...");
                 Release();
@@ -62,45 +64,66 @@ namespace TryAR.Camera
 
             try
             {
-                Debug.Log($"[Camera2Helper] Initializing camera plugin (width: {width}, height: {height}, front: {useFrontCamera})");
-
-                // Hole die korrekte Kamera-ID von PassthroughCameraUtils
-                if (!PassthroughCameraUtils.EnsureInitialized())
+                Debug.Log($"[Camera2Helper] Initializing camera plugin (width: {width}, height: {height}, eye: {eye})");
+                
+                // Hole die Activity
+                if (_activity == null)
                 {
-                    Debug.LogError("[Camera2Helper] Failed to initialize PassthroughCameraUtils");
-                    return;
+                    using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                    {
+                        _activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                    }
                 }
 
-                var targetEye = useFrontCamera ? PassthroughCameraEye.Left : PassthroughCameraEye.Right;
-                if (!PassthroughCameraUtils.CameraEyeToCameraIdMap.TryGetValue(targetEye, out var cameraData))
-                {
-                    Debug.LogError($"[Camera2Helper] Failed to get camera ID for eye: {targetEye}");
-                    return;
-                }
-
-                Debug.Log($"[Camera2Helper] Found camera for {targetEye} eye: ID={cameraData.id}, Index={cameraData.index}");
-
-                using (AndroidJavaClass unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
-                {
-                    _activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
-                }
-
+                // Erstelle Camera2Helper
                 _camera2Helper = new AndroidJavaObject("com.tryar.camera2.Camera2Helper", _activity);
                 
-                if (_camera2Helper != null)
+                // Hole die Kamera-ID basierend auf dem gewählten Auge
+                string cameraId = null;
+                
+                // Verwende PassthroughCameraUtils wie WebCamTextureManager
+                if (PassthroughCameraUtils.EnsureInitialized() && 
+                    PassthroughCameraUtils.CameraEyeToCameraIdMap.TryGetValue(eye, out var cameraData))
                 {
-                    _camera2Helper.Call("setResolution", width, height);
-                    
-                    // Übergebe die Kamera-ID direkt statt useFrontCamera
-                    _camera2Helper.Call("selectCameraById", cameraData.id);
-                    
-                    _isInitialized = true;
-                    Debug.Log($"[Camera2Helper] Initialization complete with camera ID: {cameraData.id}");
+                    // Verwende die Kamera-ID direkt
+                    cameraId = cameraData.id;
+                    Debug.Log($"[Camera2Helper] Found camera for {eye} eye: ID={cameraId}, Index={cameraData.index}");
                 }
                 else
                 {
-                    Debug.LogError("[Camera2Helper] Failed to create Camera2Helper instance");
+                    // Fallback: Hole alle Kamera-Konfigurationen und wähle die erste passende
+                    string configs = _camera2Helper.Call<string>("getCameraConfigurations");
+                    _cameraConfigs = ParseCameraConfigs(configs);
+                    
+                    var config = _cameraConfigs.Find(c => 
+                        (eye == PassthroughCameraEye.Left && c.isLeftCamera) || 
+                        (eye == PassthroughCameraEye.Right && !c.isLeftCamera));
+                    
+                    if (config != null)
+                    {
+                        cameraId = config.id;
+                        Debug.Log($"[Camera2Helper] Selected camera ID: {cameraId} for {eye} eye");
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[Camera2Helper] No camera found for {eye} eye, using first available");
+                        if (_cameraConfigs.Count > 0)
+                        {
+                            cameraId = _cameraConfigs[0].id;
+                        }
+                    }
                 }
+                
+                if (string.IsNullOrEmpty(cameraId))
+                {
+                    Debug.LogError("[Camera2Helper] No camera ID found, cannot initialize");
+                    return;
+                }
+                
+                // Initialisiere mit der gewählten Kamera
+                _camera2Helper.Call("initialize", width, height, cameraId);
+                _isInitialized = true;
+                Debug.Log($"[Camera2Helper] Initialization complete with camera ID: {cameraId}");
             }
             catch (Exception e)
             {
@@ -108,46 +131,30 @@ namespace TryAR.Camera
             }
         }
 
-        private static bool RequestCameraPermission()
+        // Setze den Callback für Bilddaten
+        public static void SetImageCallback(ImageAvailableCallback callback)
         {
-            if (Application.platform != RuntimePlatform.Android)
-                return true;
+            if (!_isInitialized)
+            {
+                Debug.LogError("[Camera2Helper] Cannot set callback - not initialized!");
+                return;
+            }
 
             try
             {
-                // Nutze die vorhandenen Permissions von PassthroughCameraUtils
-                if (!PassthroughCameraUtils.IsSupported)
-                {
-                    Debug.LogError("[Camera2Helper] Passthrough Camera API is not supported!");
-                    return false;
-                }
-
-                // Warte auf Permissions von PassthroughCameraPermissions
-                int timeout = 3000; // 3 Sekunden timeout
-                int waited = 0;
-                while (PassthroughCameraPermissions.HasCameraPermission != true && waited < timeout)
-                {
-                    System.Threading.Thread.Sleep(100);
-                    waited += 100;
-                }
-
-                if (PassthroughCameraPermissions.HasCameraPermission != true)
-                {
-                    Debug.LogError("[Camera2Helper] Failed to get camera permissions");
-                    return false;
-                }
-
-                Debug.Log("[Camera2Helper] Camera permissions granted via PassthroughCameraPermissions");
-                return true;
+                _imageCallback = callback;
+                var callbackProxy = new ImageCallbackProxy(_imageCallback);
+                _camera2Helper.Call("setImageCallback", callbackProxy);
+                Debug.Log("[Camera2Helper] Image callback registered");
             }
             catch (Exception e)
             {
-                Debug.LogError($"[Camera2Helper] Error requesting permissions: {e.Message}\n{e.StackTrace}");
-                return false;
+                Debug.LogError($"[Camera2Helper] Failed to set callback: {e.Message}\n{e.StackTrace}");
             }
         }
 
-        public static void StartCamera(ImageAvailableCallback callback)
+        // Starte die Kamera
+        public static void StartCamera(bool forceRestart = false)
         {
             if (!_isInitialized)
             {
@@ -157,13 +164,22 @@ namespace TryAR.Camera
 
             try
             {
-                Debug.Log("[Camera2Helper] Starting camera...");
-                _imageCallback = callback;
-                var callbackProxy = new ImageCallbackProxy(_imageCallback);
-                _camera2Helper.Call("setImageCallback", callbackProxy);
-                Debug.Log("[Camera2Helper] Callback set, starting camera capture");
-                _camera2Helper.Call("startCamera");
-                Debug.Log("[Camera2Helper] Camera started successfully");
+                if (!_isCameraRunning || forceRestart)
+                {
+                    if (_isCameraRunning && forceRestart)
+                    {
+                        Debug.Log("[Camera2Helper] Forcing camera restart...");
+                        StopCamera();
+                    }
+                    
+                    Debug.Log("[Camera2Helper] Starting camera capture...");
+                    _camera2Helper.Call("startCamera");
+                    _isCameraRunning = true;
+                }
+                else
+                {
+                    Debug.Log("[Camera2Helper] Camera already running, ignoring start request");
+                }
             }
             catch (Exception e)
             {
@@ -171,104 +187,76 @@ namespace TryAR.Camera
             }
         }
 
+        // Stoppe die Kamera
         public static void StopCamera()
         {
-            try
+            if (_isCameraRunning)
             {
-                _camera2Helper?.Call("stopCamera");
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"Failed to stop camera: {e.Message}");
+                try
+                {
+                    _camera2Helper.Call("stopCamera");
+                    _isCameraRunning = false;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[Camera2Helper] Failed to stop camera: {e.Message}");
+                }
             }
         }
 
+        // Gib alle Ressourcen frei
         public static void Release()
         {
             StopCamera();
-            _camera2Helper?.Dispose();
-            _camera2Helper = null;
-            _activity?.Dispose();
-            _activity = null;
+            if (_camera2Helper != null)
+            {
+                try
+                {
+                    _camera2Helper.Call("release");
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[Camera2Helper] Failed to release: {e.Message}");
+                }
+                _camera2Helper.Dispose();
+                _camera2Helper = null;
+            }
             _isInitialized = false;
+            _isCameraRunning = false;
         }
 
-        public static List<CameraConfig> GetCameraConfigurations()
+        // Hilfsmethode zum Parsen der Kamera-Konfigurationen
+        private static List<CameraConfig> ParseCameraConfigs(string jsonString)
         {
-            if (_cameraConfigs != null) return _cameraConfigs;
-            _cameraConfigs = new List<CameraConfig>();
-
-            try 
+            var configs = new List<CameraConfig>();
+            
+            try
             {
-                using (AndroidJavaObject cameraManager = new AndroidJavaObject("android.hardware.camera2.CameraManager"))
-                {
-                    // Get camera IDs
-                    AndroidJavaObject cameraIdList = cameraManager.Call<AndroidJavaObject>("getCameraIdList");
-                    string[] cameraIds = AndroidJNIHelper.ConvertFromJNIArray<string[]>(cameraIdList.GetRawObject());
-
-                    foreach (string id in cameraIds)
-                    {
-                        using (AndroidJavaObject characteristics = cameraManager.Call<AndroidJavaObject>("getCameraCharacteristics", id))
-                        {
-                            // Get basic info
-                            var sensorSizeKey = new AndroidJavaClass("android.hardware.camera2.CameraCharacteristics").GetStatic<AndroidJavaObject>("SENSOR_INFO_PIXEL_ARRAY_SIZE");
-                            var sensorSize = characteristics.Call<AndroidJavaObject>("get", sensorSizeKey);
-                            
-                            // Get lens pose
-                            var translationKey = new AndroidJavaClass("android.hardware.camera2.CameraCharacteristics").GetStatic<AndroidJavaObject>("LENS_POSE_TRANSLATION");
-                            var rotationKey = new AndroidJavaClass("android.hardware.camera2.CameraCharacteristics").GetStatic<AndroidJavaObject>("LENS_POSE_ROTATION");
-                            
-                            var translation = characteristics.Call<AndroidJavaObject>("get", translationKey);
-                            var rotation = characteristics.Call<AndroidJavaObject>("get", rotationKey);
-
-                            // Meta specific vendor tags - wir müssen diese als Keys erstellen
-                            var vendorTags = new AndroidJavaClass("android.hardware.camera2.CameraCharacteristics$Key");
-                            var cameraSourceKey = new AndroidJavaObject("android.hardware.camera2.CameraCharacteristics$Key", "com.meta.camera.source", typeof(int));
-                            var cameraPositionKey = new AndroidJavaObject("android.hardware.camera2.CameraCharacteristics$Key", "com.meta.camera.position", typeof(int));
-                            
-                            var cameraSource = characteristics.Call<AndroidJavaObject>("get", cameraSourceKey);
-                            var cameraPosition = characteristics.Call<AndroidJavaObject>("get", cameraPositionKey);
-
-                            // Extrahiere die Werte aus den Java-Objekten
-                            float[] translationArray = translation != null ? AndroidJNIHelper.ConvertFromJNIArray<float[]>(translation.GetRawObject()) : new float[3];
-                            float[] rotationArray = rotation != null ? AndroidJNIHelper.ConvertFromJNIArray<float[]>(rotation.GetRawObject()) : new float[4];
-
-                            CameraConfig config = new CameraConfig
-                            {
-                                id = id,
-                                width = sensorSize?.Call<int>("width") ?? 0,
-                                height = sensorSize?.Call<int>("height") ?? 0,
-                                lensTranslation = new Vector3(
-                                    translationArray.Length > 0 ? translationArray[0] : 0,
-                                    translationArray.Length > 1 ? translationArray[1] : 0,
-                                    translationArray.Length > 2 ? translationArray[2] : 0
-                                ),
-                                lensRotation = Quaternion.Euler(
-                                    rotationArray.Length > 0 ? rotationArray[0] : 0,
-                                    rotationArray.Length > 1 ? rotationArray[1] : 0,
-                                    rotationArray.Length > 2 ? rotationArray[2] : 0
-                                ),
-                                isPassthroughCamera = cameraSource?.Call<int>("intValue") == 0,
-                                isLeftCamera = cameraPosition?.Call<int>("intValue") == 0
-                            };
-
-                            _cameraConfigs.Add(config);
-                            Debug.Log($"[Camera2Helper] Found camera {config.id}:\n" +
-                                    $"Resolution: {config.width}x{config.height}\n" +
-                                    $"Position: {(config.isLeftCamera ? "Left" : "Right")}\n" +
-                                    $"Translation: {config.lensTranslation}\n" +
-                                    $"Rotation: {config.lensRotation.eulerAngles}\n" +
-                                    $"Is Passthrough: {config.isPassthroughCamera}");
-                        }
-                    }
-                }
+                // Hier die Implementierung zum Parsen des JSON-Strings
+                // und Erstellen der CameraConfig-Objekte
+                
+                // Beispiel:
+                // var jsonArray = new JSONArray(jsonString);
+                // for (int i = 0; i < jsonArray.length(); i++) {
+                //     var jsonObject = jsonArray.getJSONObject(i);
+                //     var config = new CameraConfig {
+                //         id = jsonObject.getString("id"),
+                //         width = jsonObject.getInt("width"),
+                //         height = jsonObject.getInt("height"),
+                //         isLeftCamera = jsonObject.getBoolean("isLeftCamera"),
+                //         isPassthroughCamera = jsonObject.getBoolean("isPassthroughCamera")
+                //     };
+                //     configs.Add(config);
+                // }
+                
+                Debug.Log($"[Camera2Helper] Parsed {configs.Count} camera configurations");
             }
             catch (Exception e)
             {
-                Debug.LogError($"[Camera2Helper] Failed to get camera metadata: {e.Message}\n{e.StackTrace}");
+                Debug.LogError($"[Camera2Helper] Failed to parse camera configs: {e.Message}");
             }
-
-            return _cameraConfigs;
+            
+            return configs;
         }
 
         public void SwitchCamera()
@@ -301,6 +289,14 @@ namespace TryAR.Camera
             if (_camera2Helper != null)
             {
                 _camera2Helper.Call("stopPeriodicCameraSwitch");
+            }
+        }
+
+        public static void RequestFrame()
+        {
+            if (_camera2Helper != null)
+            {
+                Debug.Log("[Camera2Helper] Frame wird automatisch durch kontinuierlichen Stream geliefert");
             }
         }
     }

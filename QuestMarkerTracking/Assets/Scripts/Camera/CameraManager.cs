@@ -72,105 +72,47 @@ public class CameraManager : MonoBehaviour
             // Standard-Auflösung für den Anfang
             int width = 1280;
             int height = 960;
-
-            _previewTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
-            Debug.Log($"[Camera2Helper] Created preview texture: {_previewTexture.width}x{_previewTexture.height}");
             
+            // Erstelle eine Textur für die Vorschau
+            _previewTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+            Debug.Log($"[Camera2Helper] Creating texture with format: {_previewTexture.format}");
+            
+            // Setze die Textur im Material
             if (_previewMaterial != null)
             {
                 _previewMaterial.mainTexture = _previewTexture;
-                
-                // Initialisiere die Kamera mit Standardwerten
-                NativeCameraPlugin.Initialize(width, height, _useFrontCamera);
-                StartCamera();
-                
-                if (_autoSwitchOnStart)
-                {
-                    StartAutoSwitch(_autoSwitchInterval);
-                }
             }
-            else
+            
+            // Initialisiere die Kamera mit der gewünschten Auflösung und Kamera (links/rechts)
+            PassthroughCameraEye eye = _useFrontCamera ? PassthroughCameraEye.Left : PassthroughCameraEye.Right;
+            NativeCameraPlugin.Initialize(width, height, eye);
+            
+            // Registriere den Callback für Bilddaten
+            NativeCameraPlugin.SetImageCallback(OnImageAvailable);
+            
+            // Starte die Kamera
+            StartCamera();
+            
+            // Erstelle eine Instanz für Methoden wie SwitchCamera
+            cameraPlugin = new NativeCameraPlugin();
+            
+            // Starte automatischen Kamerawechsel, falls gewünscht
+            if (_autoSwitchOnStart)
             {
-                Debug.LogError("[Camera2Helper] Preview material is missing!");
+                StartAutoSwitch(_autoSwitchInterval);
             }
         }
         catch (Exception e)
         {
-            Debug.LogError($"[Camera2Helper] Error during initialization: {e.Message}\n{e.StackTrace}");
+            Debug.LogError($"[Camera2Helper] Error initializing camera: {e.Message}\n{e.StackTrace}");
         }
     }
 
     private void StartCamera()
     {
         Debug.Log("[Camera2Helper] Starting camera capture...");
-        NativeCameraPlugin.StartCamera((data, width, height) =>
-        {
-            if (!_isRunning) return;
-            
-            if (data != null && data.Length > 0)
-            {
-                // Speichere den Frame
-                _lastFrameData = data;
-                _lastFrameWidth = width;
-                _lastFrameHeight = height;
-                
-                Debug.Log($"[Camera2Helper] Frame received: {width}x{height}, buffer size: {data.Length} bytes");
-                MainThreadDispatcher.RunOnMainThread(() => {
-                    try 
-                    {
-                        _previewTexture.LoadRawTextureData(data);
-                        _previewTexture.Apply();
-                        Debug.Log($"[Camera2Helper] Frame applied to texture: {_previewTexture.width}x{_previewTexture.height}, format: {_previewTexture.format}");
-                        
-                        // Prüfe die ersten paar Bytes des Frames
-                        string dataPreview = BitConverter.ToString(data.Take(16).ToArray());
-                        Debug.Log($"[Camera2Helper] Frame data preview (first 16 bytes): {dataPreview}");
-                    }
-                    catch (Exception e)
-                    {
-                        Debug.LogError($"[Camera2Helper] Error applying frame to texture: {e.Message}\n{e.StackTrace}");
-                        
-                        // Bei einem Fehler versuche den letzten erfolgreichen Frame erneut anzuzeigen
-                        if (_lastFrameData != null)
-                        {
-                            try
-                            {
-                                Debug.Log("[Camera2Helper] Attempting to display last successful frame");
-                                _previewTexture.LoadRawTextureData(_lastFrameData);
-                                _previewTexture.Apply();
-                            }
-                            catch (Exception e2)
-                            {
-                                Debug.LogError($"[Camera2Helper] Failed to apply last frame: {e2.Message}");
-                            }
-                        }
-                    }
-                });
-            }
-            else
-            {
-                Debug.LogWarning("[Camera2Helper] Received empty or null frame data");
-                // Bei leerem Frame zeige den letzten erfolgreichen Frame
-                if (_lastFrameData != null)
-                {
-                    MainThreadDispatcher.RunOnMainThread(() => {
-                        try
-                        {
-                            _previewTexture.LoadRawTextureData(_lastFrameData);
-                            _previewTexture.Apply();
-                            Debug.Log("[Camera2Helper] Displayed last successful frame");
-                        }
-                        catch (Exception e)
-                        {
-                            Debug.LogError($"[Camera2Helper] Failed to apply last frame: {e.Message}");
-                        }
-                    });
-                }
-            }
-        });
-
+        NativeCameraPlugin.StartCamera();
         _isRunning = true;
-        Debug.Log("[Camera2Helper] Camera capture started");
     }
 
     private void OnDestroy()
@@ -186,6 +128,47 @@ public class CameraManager : MonoBehaviour
 
     private void Update()
     {
+        if (!_isRunning || _previewTexture == null) return;
+
+        // Wenn wir Kameradaten haben, aktualisiere die Texture
+        if (_lastFrameData != null && _lastFrameData.Length > 0 && _previewTexture != null)
+        {
+            Debug.Log($"[Camera2Helper] Updating texture with data length: {_lastFrameData.Length}");
+            
+            // Prüfe RGB-Daten für Debug
+            bool hasNonZeroRG = false;
+            for (int i = 0; i < 100; i+=3) {
+                if (_lastFrameData[i] > 10 || _lastFrameData[i+1] > 10) { // R oder G > 10
+                    hasNonZeroRG = true;
+                    break;
+                }
+            }
+            Debug.Log($"[Camera2Helper] RGB-Werte: R/G Werte vorhanden: {hasNonZeroRG}");
+            
+            // Prüfe wie die Texture-Daten geladen werden
+            // Direktes Laden der RGB-Daten in die Texture
+            _previewTexture.LoadRawTextureData(_lastFrameData);
+            _previewTexture.Apply();
+            
+            // Texture dem Material zuweisen
+            if (_previewMaterial != null)
+            {
+                _previewMaterial.mainTexture = _previewTexture;
+            }
+
+            Debug.Log($"[Camera2Helper] Texture: Format={_previewTexture.format}, " +
+                       $"Dimension={_previewTexture.width}x{_previewTexture.height}, " +
+                       $"Mipmaps={_previewTexture.mipmapCount}");
+            
+            // Nach Apply() prüfen wir einen einzelnen Pixel
+            Color color = _previewTexture.GetPixel(
+                _previewTexture.width/2, 
+                _previewTexture.height/2);
+            Debug.Log($"[Camera2Helper] Mittlerer Pixel nach Apply: " +
+                      $"R={color.r:F2}, G={color.g:F2}, B={color.b:F2}");
+        }
+
+        // Dimensions-Tracking wie zuvor
         if (_previewMaterial != null && _previewMaterial.mainTexture != null)
         {
             var texture = _previewMaterial.mainTexture as Texture2D;
@@ -198,6 +181,58 @@ public class CameraManager : MonoBehaviour
                     _lastTextureDimensions = currentDimensions;
                 }
             }
+        }
+
+        // Alle 5 Sekunden ein Testmuster mit Farbverläufen erzeugen
+        // Kommentiere diesen Block aus, wenn du die echten Kamera-Frames sehen möchtest
+        /*
+        if (Time.time % 5 < 0.1f && _previewTexture != null) {
+            Debug.Log("[Camera2Helper] Erzeuge UV-Testmuster");
+            Color32[] testColors = new Color32[_previewTexture.width * _previewTexture.height];
+            
+            for (int y = 0; y < _previewTexture.height; y++) {
+                for (int x = 0; x < _previewTexture.width; x++) {
+                    // U variiert horizontal, V variiert vertikal
+                    byte u = (byte)(128 + (x * 127 / _previewTexture.width - 64));
+                    byte v = (byte)(128 + (y * 127 / _previewTexture.height - 64));
+                    
+                    // Y konstant bei mittlerer Helligkeit
+                    byte yVal = 128;
+                    
+                    // BT.601 Formel für RGB
+                    int r = Mathf.Clamp(yVal + (140 * (v - 128)) / 100, 0, 255);
+                    int g = Mathf.Clamp(yVal - (34 * (u - 128)) / 100 - (71 * (v - 128)) / 100, 0, 255);
+                    int b = Mathf.Clamp(yVal + (177 * (u - 128)) / 100, 0, 255);
+                    
+                    testColors[y * _previewTexture.width + x] = new Color32((byte)r, (byte)g, (byte)b, 255);
+                }
+            }
+            
+            _previewTexture.SetPixels32(testColors);
+            _previewTexture.Apply();
+            Debug.Log("[Camera2Helper] UV-Testmuster angewandt");
+        }
+        */
+    }
+
+    private void RequestNewFrame()
+    {
+        Debug.Log("[Camera2Helper] Requesting new frame...");
+        
+        // NICHT die Kamera neu starten oder den Callback neu registrieren!
+        // Die Kamera läuft bereits kontinuierlich und sendet Frames
+        
+        // Stattdessen nur prüfen, ob die Kamera läuft
+        if (!_isRunning)
+        {
+            // Nur wenn die Kamera nicht läuft, starten wir sie neu
+            NativeCameraPlugin.SetImageCallback(OnImageAvailable);
+            NativeCameraPlugin.StartCamera();
+            _isRunning = true;
+        }
+        else
+        {
+            Debug.Log("[Camera2Helper] Kamera läuft bereits, keine Neustart notwendig");
         }
     }
 
@@ -223,24 +258,20 @@ public class CameraManager : MonoBehaviour
 
     public void SwitchCamera()
     {
-        if (cameraPlugin != null)
-        {
-            _useFrontCamera = !_useFrontCamera; // Toggle camera selection
-            Debug.Log($"[Camera2Helper] Switching to {(_useFrontCamera ? "left" : "right")} camera");
-            
-            // Stop current camera
-            if (_isRunning)
-            {
-                NativeCameraPlugin.StopCamera();
-                _isRunning = false;
-            }
-
-            // Initialize with new camera
-            NativeCameraPlugin.Initialize(_previewTexture.width, _previewTexture.height, _useFrontCamera);
-            StartCamera();
-            
-            Debug.Log($"[Camera2Helper] Camera switch complete. Now using {(_useFrontCamera ? "left" : "right")} camera");
-        }
+        if (!_isRunning) return;
+        
+        // Stoppe die aktuelle Kamera
+        NativeCameraPlugin.StopCamera();
+        
+        // Wechsle die Kamera-Einstellung
+        _useFrontCamera = !_useFrontCamera;
+        
+        // Initialize with new camera - Konvertiere bool zu PassthroughCameraEye
+        PassthroughCameraEye eye = _useFrontCamera ? PassthroughCameraEye.Left : PassthroughCameraEye.Right;
+        NativeCameraPlugin.Initialize(_previewTexture.width, _previewTexture.height, eye);
+        StartCamera();
+        
+        Debug.Log($"[Camera2Helper] Camera switch complete. Now using {(_useFrontCamera ? "left" : "right")} camera");
     }
 
     private void OnDisable()
@@ -253,6 +284,45 @@ public class CameraManager : MonoBehaviour
         {
             NativeCameraPlugin.StopCamera();
             _isRunning = false;
+        }
+    }
+
+    private void OnImageAvailable(byte[] data, int width, int height)
+    {
+        if (!_isRunning) return;
+        
+        if (data != null && data.Length > 0)
+        {
+            Debug.Log($"[Camera2Helper] Got frame: {width}x{height}, size: {data.Length} bytes");
+            
+            // Speichere den letzten erfolgreichen Frame
+            _lastFrameData = data;
+            _lastFrameWidth = width;
+            _lastFrameHeight = height;
+            
+            // Aktualisiere die Textur
+            try 
+            {
+                // Prüfe, ob die Textur die richtige Größe hat
+                if (_previewTexture.width != width || _previewTexture.height != height)
+                {
+                    Debug.Log($"[Camera2Helper] Resizing texture to {width}x{height}");
+                    _previewTexture.Reinitialize(width, height);
+                }
+                
+                // Lade die Daten in die Textur
+                _previewTexture.LoadRawTextureData(data);
+                _previewTexture.Apply();
+                Debug.Log("[Camera2Helper] Frame applied to texture");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[Camera2Helper] Error applying frame: {e.Message}");
+            }
+        }
+        else
+        {
+            Debug.LogWarning("[Camera2Helper] Received empty frame");
         }
     }
 } 
