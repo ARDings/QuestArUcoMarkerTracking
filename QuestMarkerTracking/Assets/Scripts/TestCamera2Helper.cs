@@ -52,7 +52,6 @@ public class TestCamera2Helper : MonoBehaviour
                                         }
                                         else
                                         {
-                                            Debug.Log($"Found not Camera2Helper class: {className}");
                                         }
                                     }
                                 }
