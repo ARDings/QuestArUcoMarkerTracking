@@ -26,9 +26,12 @@ EditorBuildSettings:
   - enabled: 0
     path: Assets/ArUcoMarkerTracking.unity
     guid: 42cb89ae9cffec24c8d1e5a4876b74a7
-  - enabled: 0
+  - enabled: 1
     path: Assets/ChArUcoMarkerTracking.unity
     guid: 808dfb1846283aa4b92a2a918fb9d1fb
+  - enabled: 0
+    path: Assets/Samples/UXR.QuestCamera/2.5.0/Digit Recognition with Unity Sentis/Scenes/Main.unity
+    guid: d21f9028511979e4bbe9142830c1ea80
   m_configObjects:
     Unity.XR.Oculus.Settings: {fileID: 11400000, guid: f2bf97b3acdb64248a707c407c9fc54e, type: 2}
     com.unity.xr.management.loader_settings: {fileID: 11400000, guid: a971eac5e950046e586c5e153e32d05c, type: 2}
