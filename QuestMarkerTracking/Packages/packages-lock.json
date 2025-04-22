@@ -235,6 +235,23 @@
       },
       "url": "https://packages.unity.com"
     },
+    "com.uralstech.utils.singleton": {
+      "version": "https://github.com/Uralstech/Utils.Singleton.git#upm",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {},
+      "hash": "4075ad706e203b79fe7ff067d8f2b0edb35667c4"
+    },
+    "com.uralstech.uxr.questcamera": {
+      "version": "https://github.com/Uralstech/UXR.QuestCamera.git#upm",
+      "depth": 0,
+      "source": "git",
+      "dependencies": {
+        "com.uralstech.utils.singleton": "1.2.1",
+        "com.unity.modules.androidjni": "1.0.0"
+      },
+      "hash": "5a4ee5fde61293a3ffae5cf31ca1fa6f554effa8"
+    },
     "com.yasirkula.nativecamera": {
       "version": "https://github.com/yasirkula/UnityNativeCamera.git",
       "depth": 0,
