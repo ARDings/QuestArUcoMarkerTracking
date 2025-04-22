@@ -18,13 +18,15 @@ import org.json.JSONObject
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import kotlin.IllegalStateException
+import kotlin.math.max
+import kotlin.math.min
 
 class Camera2Helper(private val context: Context) {
     companion object {
         private const val TAG = "Camera2Helper"
         private const val CAMERA_TIMEOUT_MS = 2500L
-        // Meta Headset Camera Permission
         private const val HEADSET_CAMERA_PERMISSION = "horizonos.permission.HEADSET_CAMERA"
+        private const val MAX_IMAGES = 4  // Erhöht für mehr Puffer
     }
 
     private val cameraManager: CameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -39,16 +41,119 @@ class Camera2Helper(private val context: Context) {
     private var frameHeight = 720
     private var currentCameraId: String? = null
     private var lastFrameTime = 0L
+    private var isInitialized = false
 
     interface ImageCallback {
         fun onImageAvailable(data: ByteArray, width: Int, height: Int)
     }
 
+    // Starte den Hintergrund-Thread für die Kamera
+    private fun startBackgroundThread() {
+        try {
+            Log.d(TAG, "[Camera2Helper] Starting background thread")
+            backgroundThread = HandlerThread("CameraBackground").apply {
+                start()
+                backgroundHandler = Handler(looper)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Failed to start background thread: ${e.message}", e)
+        }
+    }
+
+    // Stoppe den Hintergrund-Thread
+    private fun stopBackgroundThread() {
+        try {
+            Log.d(TAG, "[Camera2Helper] Stopping background thread")
+            backgroundThread?.quitSafely()
+            try {
+                backgroundThread?.join()
+                backgroundThread = null
+                backgroundHandler = null
+            } catch (e: InterruptedException) {
+                Log.e(TAG, "[Camera2Helper] Error stopping background thread", e)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Error in stopBackgroundThread: ${e.message}", e)
+        }
+    }
+
+    // Callback für Kamera-Geräte-Status
+    private val cameraStateCallback = object : CameraDevice.StateCallback() {
+        override fun onOpened(camera: CameraDevice) {
+            cameraOpenCloseLock.release()
+            cameraDevice = camera
+            Log.d(TAG, "[Camera2Helper] Camera opened successfully: ${camera.id}")
+            createCaptureSession()
+        }
+
+        override fun onDisconnected(camera: CameraDevice) {
+            cameraOpenCloseLock.release()
+            Log.e(TAG, "[Camera2Helper] Camera ${camera.id} disconnected!")
+            camera.close()
+            cameraDevice = null
+        }
+
+        override fun onError(camera: CameraDevice, error: Int) {
+            cameraOpenCloseLock.release()
+            Log.e(TAG, "[Camera2Helper] Camera ${camera.id} error: $error")
+            camera.close()
+            cameraDevice = null
+        }
+    }
+
+    // Callback für Capture-Session-Status
+    private val captureSessionStateCallback = object : CameraCaptureSession.StateCallback() {
+        override fun onConfigured(session: CameraCaptureSession) {
+            Log.d(TAG, "[Camera2Helper] CaptureSession configured for camera: ${session.device.id}")
+            captureSession = session
+            try {
+                // Erstelle den Capture Request
+                val captureRequest = createCaptureRequest(imageReader!!.surface)
+                session.setRepeatingRequest(captureRequest, captureCallback, backgroundHandler)
+                Log.d(TAG, "[Camera2Helper] Started repeating capture request for camera: ${session.device.id}")
+            } catch (e: Exception) {
+                Log.e(TAG, "[Camera2Helper] Failed to start capture: ${e.message}")
+            }
+        }
+
+        override fun onConfigureFailed(session: CameraCaptureSession) {
+            Log.e(TAG, "[Camera2Helper] Failed to configure capture session for camera: ${session.device.id}")
+        }
+    }
+
+    // Callback für Capture-Ergebnisse
+    private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(
+            session: CameraCaptureSession,
+            request: CaptureRequest,
+            result: TotalCaptureResult
+        ) {
+            super.onCaptureCompleted(session, request, result)
+            // Hier könnten wir Metadaten aus dem Capture-Ergebnis verarbeiten
+        }
+    }
+
+    // Listener für neue Bilder
     private val imageReaderListener = ImageReader.OnImageAvailableListener { reader ->
         var image: Image? = null
         try {
             image = reader.acquireLatestImage()
             if (image != null) {
+                Log.d(TAG, """[Camera2Helper] Frame Details:
+                    |Format: ${image.format}
+                    |Size: ${image.width}x${image.height}
+                    |Timestamp: ${image.timestamp}
+                    |Planes: ${image.planes.size}""".trimMargin())
+                
+                image.planes.forEachIndexed { index, plane ->
+                    Log.d(TAG, """[Camera2Helper] Plane $index Details:
+                        |Buffer size: ${plane.buffer.remaining()}
+                        |Pixel stride: ${plane.pixelStride}
+                        |Row stride: ${plane.rowStride}
+                        |Buffer direct: ${plane.buffer.isDirect}
+                        |Buffer capacity: ${plane.buffer.capacity()}""".trimMargin())
+                }
+
                 val now = System.currentTimeMillis()
                 if (lastFrameTime > 0) {
                     Log.d(TAG, "[Camera2Helper] Frame received! Time since last frame: ${now - lastFrameTime}ms")
@@ -59,368 +164,390 @@ class Camera2Helper(private val context: Context) {
 
                 val width = image.width
                 val height = image.height
-                val nv21Data = YUV_420_888toNV21(image)
                 
-                // Pixel-Analyse für Debugging
-                analyzePixelData(nv21Data)
-
-                imageCallback?.onImageAvailable(nv21Data, width, height)
+                // Konvertiere das YUV-Bild zu NV21 (ein Format, das leichter zu verarbeiten ist)
+                val nv21 = YUV_420_888toNV21(image)
+                
+                // Analysiere die Pixeldaten für Debugging
+                analyzePixelData(nv21, width, height)
+                
+                // Sende die Daten an den Callback
+                imageCallback?.onImageAvailable(nv21, width, height)
+            } else {
+                Log.w(TAG, "[Camera2Helper] Received null image from camera $currentCameraId")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Error processing image", e)
+            Log.e(TAG, "[Camera2Helper] Error processing image from camera $currentCameraId: ${e.message}")
         } finally {
             image?.close()
         }
     }
 
-    // Neue Methode zur Analyse der Pixeldaten
-    private fun analyzePixelData(data: ByteArray) {
-        try {
-            var nonZeroY = 0
-            var nonZeroUV = 0
-            
-            // Stichprobenartige Prüfung (100 Pixel)
-            val step = data.size / 200
-            for (i in 0 until 100) {
-                val index = i * step
-                if (index < data.size) {
-                    // Y-Werte prüfen (erste 2/3 des Arrays)
-                    if (index < data.size * 2/3 && data[index].toInt() and 0xFF != 0) {
-                        nonZeroY++
-                    }
-                    // UV-Werte prüfen (letztes 1/3 des Arrays)
-                    else if (index >= data.size * 2/3 && data[index].toInt() and 0xFF != 128) {
-                        nonZeroUV++
-                    }
+    // Konvertiere YUV_420_888 zu NV21
+    private fun YUV_420_888toNV21(image: Image): ByteArray {
+        val width = image.width
+        val height = image.height
+        val ySize = width * height
+        val uvSize = width * height / 4
+        
+        val nv21 = ByteArray(ySize + uvSize * 2)
+        
+        // Get the YUV planes
+        val planes = image.planes
+        val yBuffer = planes[0].buffer
+        val uBuffer = planes[1].buffer
+        val vBuffer = planes[2].buffer
+        
+        val yRowStride = planes[0].rowStride
+        val yPixelStride = planes[0].pixelStride
+        val uvRowStride = planes[1].rowStride
+        val uvPixelStride = planes[1].pixelStride
+        
+        Log.d(TAG, "[Camera2Helper] Image format: YUV_420_888, size: ${width}x${height}")
+        Log.d(TAG, "[Camera2Helper] Y plane: stride=${yRowStride}, pixelStride=${yPixelStride}")
+        Log.d(TAG, "[Camera2Helper] UV planes: stride=${uvRowStride}, pixelStride=${uvPixelStride}")
+        
+        // Copy Y plane
+        if (yPixelStride == 1) {
+            // Fast path for contiguous data
+            for (row in 0 until height) {
+                yBuffer.position(row * yRowStride)
+                yBuffer.get(nv21, row * width, width)
+            }
+        } else {
+            // Slow path for non-contiguous data
+            var yBufferPos = 0
+            for (row in 0 until height) {
+                for (col in 0 until width) {
+                    nv21[row * width + col] = yBuffer.get(yBufferPos)
+                    yBufferPos += yPixelStride
                 }
+                yBufferPos += yRowStride - width * yPixelStride
+            }
+        }
+        
+        // Copy UV data
+        var pos = 0
+        for (row in 0 until height / 2) {
+            for (col in 0 until width / 2) {
+                val uvBufferPos = row * uvRowStride + col * uvPixelStride
+                nv21[ySize + pos] = vBuffer.get(uvBufferPos)      // V
+                nv21[ySize + pos + 1] = uBuffer.get(uvBufferPos)  // U
+                pos += 2
+            }
+        }
+        
+        return nv21
+    }
+
+    // Erweiterte Pixel-Analyse
+    private fun analyzePixelData(data: ByteArray, width: Int, height: Int) {
+        try {
+            val ySize = width * height
+            var yStats = PixelStats()
+            var uStats = PixelStats()
+            var vStats = PixelStats()
+            
+            // Y-Plane Analyse (Helligkeit)
+            for (i in 0 until min(1000, ySize)) {  // Analysiere mehr Pixel
+                val value = data[i].toInt() and 0xFF
+                yStats.update(value)
             }
             
-            Log.d(TAG, "[Camera2Helper] Pixel Analysis: nonZeroY=$nonZeroY/100, nonZeroUV=$nonZeroUV/100")
+            // UV-Planes Analyse
+            for (i in 0 until min(500, ySize / 4)) {
+                val vValue = data[ySize + i * 2].toInt() and 0xFF
+                val uValue = data[ySize + i * 2 + 1].toInt() and 0xFF
+                vStats.update(vValue)
+                uStats.update(uValue)
+            }
+            
+            Log.d(TAG, """[Camera2Helper] Detailed Pixel Analysis (NV21):
+                |Y-Plane (Brightness): min=${yStats.min}, max=${yStats.max}, avg=${yStats.average}, nonZero=${yStats.nonZeroCount}
+                |U-Plane (Blue-Yellow): min=${uStats.min}, max=${uStats.max}, avg=${uStats.average}, nonNeutral=${uStats.nonNeutralCount}
+                |V-Plane (Red-Green): min=${vStats.min}, max=${vStats.max}, avg=${vStats.average}, nonNeutral=${vStats.nonNeutralCount}
+                |Frame appears to be: ${determineFrameState(yStats, uStats, vStats)}
+                """.trimMargin())
+            
         } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Error analyzing pixel data", e)
+            Log.e(TAG, "[Camera2Helper] Error analyzing pixel data: ${e.message}")
         }
     }
 
+    private class PixelStats {
+        var min = 255
+        var max = 0
+        var sum = 0L
+        var count = 0
+        var nonZeroCount = 0
+        var nonNeutralCount = 0  // Für UV-Werte, die nicht 128 sind
+        
+        val average: Int get() = if (count > 0) (sum / count).toInt() else 0
+        
+        fun update(value: Int) {
+            min = min(min, value)
+            max = max(max, value)
+            sum += value
+            count++
+            if (value > 0) nonZeroCount++
+            if (value != 128) nonNeutralCount++
+        }
+    }
+
+    private fun determineFrameState(yStats: PixelStats, uStats: PixelStats, vStats: PixelStats): String {
+        return when {
+            yStats.max == 0 -> "Completely black (no signal?)"
+            yStats.min == 255 -> "Completely white (overexposed?)"
+            yStats.average < 5 -> "Very dark (underexposed?)"
+            yStats.average > 250 -> "Very bright (overexposed?)"
+            uStats.nonNeutralCount == 0 && vStats.nonNeutralCount == 0 -> "Grayscale only (color disabled?)"
+            yStats.nonZeroCount == 0 -> "No luminance data (camera error?)"
+            else -> "Normal frame"
+        }
+    }
+
+    // Erstelle eine Capture-Session
+    private fun createCaptureSession() {
+        try {
+            val surface = imageReader?.surface
+            if (surface == null) {
+                Log.e(TAG, "[Camera2Helper] Surface is null!")
+                return
+            }
+
+            Log.d(TAG, "[Camera2Helper] Creating capture session for camera: ${cameraDevice?.id}")
+            
+            // Wichtig: Setze die FPS explizit
+            val captureBuilder = cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)?.apply {
+                addTarget(surface)
+                
+                // Auto-Exposure aktivieren
+                set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+                set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+                
+                // Frame Rate explizit setzen
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(30, 30))
+            }?.build()
+
+            if (captureBuilder == null) {
+                Log.e(TAG, "[Camera2Helper] Failed to create capture request!")
+                return
+            }
+
+            // Erstelle die Capture Session
+            cameraDevice?.createCaptureSession(
+                listOf(surface),
+                object : CameraCaptureSession.StateCallback() {
+                    override fun onConfigured(session: CameraCaptureSession) {
+                        Log.d(TAG, "[Camera2Helper] Capture session configured")
+                        captureSession = session
+                        try {
+                            session.setRepeatingRequest(
+                                captureBuilder,
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureCompleted(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        result: TotalCaptureResult
+                                    ) {
+                                        // Log jedes 30. Frame
+                                        val timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP)
+                                        if ((timestamp ?: 0) % 30 == 0L) {
+                                            Log.d(TAG, "[Camera2Helper] Frame captured, timestamp: $timestamp")
+                                        }
+                                    }
+                                },
+                                backgroundHandler
+                            )
+                            Log.d(TAG, "[Camera2Helper] Started repeating capture request")
+                        } catch (e: Exception) {
+                            Log.e(TAG, "[Camera2Helper] Failed to start repeating request: ${e.message}")
+                        }
+                    }
+
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        Log.e(TAG, "[Camera2Helper] Failed to configure capture session!")
+                    }
+                },
+                backgroundHandler
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Error in createCaptureSession: ${e.message}")
+        }
+    }
+
+    // Erstelle einen Capture-Request
+    private fun createCaptureRequest(surface: Surface): CaptureRequest {
+        return cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+            addTarget(surface)
+            
+            // Automatische Belichtung aktivieren
+            set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
+            set(CaptureRequest.CONTROL_AE_MODE, CameraMetadata.CONTROL_AE_MODE_ON)
+            
+            // Setze einen initialen ISO-Wert
+            set(CaptureRequest.SENSOR_SENSITIVITY, 800) // ISO 800
+            
+            // Setze eine minimale Belichtungszeit
+            set(CaptureRequest.SENSOR_EXPOSURE_TIME, 1000000L) // 1ms
+            
+            // Aktiviere Auto-White-Balance
+            set(CaptureRequest.CONTROL_AWB_MODE, CameraMetadata.CONTROL_AWB_MODE_AUTO)
+            
+            Log.d(TAG, "[Camera2Helper] Capture request configured with auto exposure and ISO 800")
+        }.build()
+    }
+
+    // Richte den ImageReader ein
+    private fun setupImageReader() {
+        try {
+            if (backgroundHandler == null) {
+                Log.e(TAG, "[Camera2Helper] Background handler is null, starting background thread first")
+                startBackgroundThread()
+                if (backgroundHandler == null) {
+                    throw IllegalStateException("Failed to create background handler")
+                }
+            }
+            
+            imageReader = ImageReader.newInstance(
+                frameWidth, 
+                frameHeight, 
+                ImageFormat.YUV_420_888, 
+                MAX_IMAGES
+            ).apply {
+                setOnImageAvailableListener(imageReaderListener, backgroundHandler)
+            }
+            Log.d(TAG, "[Camera2Helper] ImageReader created with size: ${frameWidth}x${frameHeight}")
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Failed to setup ImageReader: ${e.message}", e)
+            throw e
+        }
+    }
+
+    // Initialisiere die Kamera mit der angegebenen ID und Auflösung
     fun initialize(width: Int, height: Int, cameraId: String) {
-        Log.d(TAG, "[Camera2Helper] Initializing with Width: $width, Height: $height, CameraID: $cameraId")
+        try {
+            Log.d(TAG, "[Camera2Helper] Initializing camera with ID: $cameraId, resolution: ${width}x${height}")
+            
+            // Setze die Auflösung
+            frameWidth = width
+            frameHeight = height
+            
+            // Setze die Kamera-ID
+            currentCameraId = cameraId
+            
+            // Starte den Hintergrund-Thread
+            startBackgroundThread()
+            
+            // Richte den ImageReader ein
+            setupImageReader()
+            
+            isInitialized = true
+            Log.d(TAG, "[Camera2Helper] Initialization complete with camera ID: $cameraId")
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Failed to initialize: ${e.message}", e)
+            stopBackgroundThread()
+        }
+    }
+
+    // Setze die Auflösung
+    fun setResolution(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) {
+            Log.e(TAG, "[Camera2Helper] Invalid resolution: ${width}x${height}")
+            return
+        }
+        
         frameWidth = width
         frameHeight = height
-        currentCameraId = cameraId
-        
-        // Starte den Hintergrund-Thread
-        startBackgroundThread()
-        
-        // Erstelle den ImageReader
-        setupImageReader()
-    }
-    
-    // Neue Methode zum Einrichten des ImageReaders
-    private fun setupImageReader() {
-        // Bestehenden ImageReader schließen, falls vorhanden
-        imageReader?.close()
-        
-        // Neuen ImageReader erstellen
-        imageReader = ImageReader.newInstance(
-            frameWidth, 
-            frameHeight, 
-            ImageFormat.YUV_420_888, 
-            2
-        ).apply {
-            setOnImageAvailableListener(imageReaderListener, backgroundHandler)
-        }
-        
-        Log.d(TAG, "[Camera2Helper] ImageReader created with size: ${frameWidth}x${frameHeight}")
+        Log.d(TAG, "[Camera2Helper] Resolution set to ${width}x${height}")
     }
 
-    fun startCamera() {
-        if (currentCameraId == null) {
-            Log.e(TAG, "[Camera2Helper] No camera selected, cannot start.")
-            return
-        }
-        if (backgroundHandler == null) {
-            Log.e(TAG, "[Camera2Helper] Background handler not initialized.")
-            startBackgroundThread()
-            if (backgroundHandler == null) return
-        }
-
-        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "[Camera2Helper] Android Camera permission not granted.")
-            return
-        }
-        
+    // Starte die Kamera
+    fun startCamera(cameraId: String) {
         try {
-            // Prüfe Meta-spezifische Berechtigung
-            if (context.packageManager.hasSystemFeature("com.meta.feature.PASSTHROUGH_CAMERA")) {
-                if (context.checkSelfPermission(HEADSET_CAMERA_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
-                    Log.e(TAG, "[Camera2Helper] Meta Headset Camera permission ($HEADSET_CAMERA_PERMISSION) not granted.")
-                    return
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "[Camera2Helper] Error checking Meta camera permission: ${e.message}")
-            // Fahre fort, da dies möglicherweise kein Meta-Gerät ist
-        }
-
-        try {
+            checkCameraCapabilities(cameraId)
             if (!cameraOpenCloseLock.tryAcquire(CAMERA_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                throw RuntimeException("Time out waiting to lock camera opening.")
+                throw RuntimeException("[Camera2Helper] Time out waiting to lock camera opening.")
+            }
+            if (currentCameraId == null) {
+                Log.e(TAG, "[Camera2Helper] No camera selected, cannot start.")
+                return
             }
             
-            Log.d(TAG, "[Camera2Helper] Starting camera with ID: $currentCameraId")
-            cameraManager.openCamera(currentCameraId!!, cameraStateCallback, backgroundHandler)
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "[Camera2Helper] Failed to open camera", e)
-            cameraOpenCloseLock.release()
-        } catch (e: InterruptedException) {
-            Log.e(TAG, "[Camera2Helper] Interrupted while opening camera", e)
-            cameraOpenCloseLock.release()
+            if (!isInitialized) {
+                Log.e(TAG, "[Camera2Helper] Cannot start camera - not initialized!")
+                return
+            }
+            
+            try {
+                // Prüfe Berechtigungen
+                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                    Log.e(TAG, "[Camera2Helper] Camera permission not granted")
+                    return
+                }
+                
+                // Prüfe Meta-spezifische Berechtigung
+                try {
+                    if (ActivityCompat.checkSelfPermission(context, HEADSET_CAMERA_PERMISSION) != PackageManager.PERMISSION_GRANTED) {
+                        Log.w(TAG, "[Camera2Helper] Meta headset camera permission not granted")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "[Camera2Helper] Meta headset camera permission check failed: ${e.message}")
+                }
+                
+                // Öffne die Kamera
+                Log.d(TAG, "[Camera2Helper] Starting camera with ID: $currentCameraId")
+                cameraManager.openCamera(currentCameraId!!, cameraStateCallback, backgroundHandler)
+            } catch (e: Exception) {
+                Log.e(TAG, "[Camera2Helper] Failed to start camera: ${e.message}", e)
+                cameraOpenCloseLock.release()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "[Camera2Helper] Failed to start camera: ${e.message}", e)
             cameraOpenCloseLock.release()
         }
     }
 
+    // Stoppe die Kamera
     fun stopCamera() {
         try {
+            // Warte auf Freigabe der Kamera
             cameraOpenCloseLock.acquire()
-            try {
-                captureSession?.close()
-                captureSession = null
-                
-                cameraDevice?.close()
-                cameraDevice = null
-                
-                imageReader?.close()
-                imageReader = null
-                
-                Log.d(TAG, "[Camera2Helper] Camera stopped")
-            } finally {
-                cameraOpenCloseLock.release()
-            }
+            
+            // Stoppe die Capture-Session
+            captureSession?.close()
+            captureSession = null
+            
+            // Schließe die Kamera
+            cameraDevice?.close()
+            cameraDevice = null
+            
+            // Schließe den ImageReader
+            imageReader?.close()
+            imageReader = null
+            
+            // Stoppe den Hintergrund-Thread
+            stopBackgroundThread()
+            
+            Log.d(TAG, "[Camera2Helper] Camera stopped")
         } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Error stopping camera", e)
+            Log.e(TAG, "[Camera2Helper] Error stopping camera: ${e.message}", e)
+        } finally {
+            cameraOpenCloseLock.release()
         }
     }
 
+    // Gib alle Ressourcen frei
     fun release() {
         stopCamera()
-        stopBackgroundThread()
+        isInitialized = false
         Log.d(TAG, "[Camera2Helper] Resources released")
     }
 
-    private fun startBackgroundThread() {
-        try {
-            backgroundThread = HandlerThread("CameraBackground").apply {
-                start()
-                backgroundHandler = Handler(looper)
-            }
-            Log.d(TAG, "[Camera2Helper] Background thread started")
-        } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Failed to start background thread", e)
-        }
-    }
-
-    private fun stopBackgroundThread() {
-        try {
-            backgroundThread?.quitSafely()
-            backgroundThread?.join()
-            backgroundThread = null
-            backgroundHandler = null
-            Log.d(TAG, "[Camera2Helper] Background thread stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Failed to stop background thread", e)
-        }
-    }
-
-    private val cameraStateCallback = object : CameraDevice.StateCallback() {
-        override fun onOpened(camera: CameraDevice) {
-            Log.d(TAG, "[Camera2Helper] Camera opened successfully: ${camera.id}")
-            cameraDevice = camera
-            cameraOpenCloseLock.release()
-            createCaptureSession()
-        }
-
-        override fun onDisconnected(camera: CameraDevice) {
-            Log.w(TAG, "[Camera2Helper] Camera disconnected: ${camera.id}")
-            cameraOpenCloseLock.release()
-            camera.close()
-            cameraDevice = null
-        }
-
-        override fun onError(camera: CameraDevice, error: Int) {
-            Log.e(TAG, "[Camera2Helper] Camera device error $error for camera: ${camera.id}")
-            cameraOpenCloseLock.release()
-            camera.close()
-            cameraDevice = null
-        }
-    }
-
-    private val captureSessionStateCallback = object : CameraCaptureSession.StateCallback() {
-        override fun onConfigured(session: CameraCaptureSession) {
-            Log.d(TAG, "[Camera2Helper] Session configured, starting repeating request")
-            captureSession = session
-            try {
-                // Erstelle die Capture Request
-                val device = cameraDevice ?: throw IllegalStateException("Camera device is null")
-                val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
-                
-                // Füge die Surface hinzu
-                val surface = imageReader?.surface ?: throw IllegalStateException("ImageReader surface is null")
-                builder.addTarget(surface)
-                
-                // Setze wichtige Parameter
-                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                builder.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_AUTO)
-                
-                // Für Meta Quest: Setze Frame-Rate auf 24-30 FPS
-                builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(24, 30))
-                
-                // Starte den kontinuierlichen Capture-Request
-                session.setRepeatingRequest(builder.build(), captureCallback, backgroundHandler)
-            } catch (e: Exception) {
-                Log.e(TAG, "[Camera2Helper] Failed to start capture request", e)
-            }
-        }
-
-        override fun onConfigureFailed(session: CameraCaptureSession) {
-            Log.e(TAG, "[Camera2Helper] Failed to configure capture session")
-        }
-    }
-
-    private val captureCallback = object : CameraCaptureSession.CaptureCallback() {
-        override fun onCaptureCompleted(
-            session: CameraCaptureSession,
-            request: CaptureRequest,
-            result: TotalCaptureResult
-        ) {
-            // Hier könnten wir Metadaten aus dem Capture-Ergebnis verarbeiten
-            // Für jetzt lassen wir es leer, da wir die Bilder über den ImageReader bekommen
-        }
-    }
-
-    private fun createCaptureSession() {
-        val localCameraDevice = cameraDevice
-        val localImageReader = imageReader
-        
-        if (localCameraDevice == null) {
-            Log.e(TAG, "[Camera2Helper] Cannot create capture session, cameraDevice is null.")
-            return
-        }
-        if (localImageReader == null || localImageReader.surface == null) {
-            Log.e(TAG, "[Camera2Helper] Cannot create capture session, imageReader or surface is null.")
-            return
-        }
-
-        try {
-            Log.d(TAG, "[Camera2Helper] Creating capture session...")
-            val surface = localImageReader.surface
-            
-            // Verwende die klassische createCaptureSession-Methode
-            localCameraDevice.createCaptureSession(
-                listOf(surface),
-                captureSessionStateCallback,
-                backgroundHandler
-            )
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "[Camera2Helper] Failed to create capture session", e)
-        } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Error creating capture session: ${e.message}", e)
-        }
-    }
-
-    private fun YUV_420_888toNV21(image: Image): ByteArray {
-        try {
-            val width = image.width
-            val height = image.height
-            val ySize = width * height
-            val uvSize = width * height / 2
-            
-            val nv21 = ByteArray(ySize + uvSize)
-            
-            // Get the YUV planes
-            val planes = image.planes
-            val yBuffer = planes[0].buffer
-            val uBuffer = planes[1].buffer
-            val vBuffer = planes[2].buffer
-            
-            // Get plane strides
-            val yPixelStride = planes[0].pixelStride
-            val yRowStride = planes[0].rowStride
-            val uPixelStride = planes[1].pixelStride
-            val uRowStride = planes[1].rowStride
-            val vPixelStride = planes[2].pixelStride
-            val vRowStride = planes[2].rowStride
-            
-            Log.d(TAG, "[Camera2Helper] Y plane: pixelStride=$yPixelStride, rowStride=$yRowStride")
-            Log.d(TAG, "[Camera2Helper] U plane: pixelStride=$uPixelStride, rowStride=$uRowStride")
-            Log.d(TAG, "[Camera2Helper] V plane: pixelStride=$vPixelStride, rowStride=$vRowStride")
-            
-            // Buffer sizes
-            val yBufferSize = yBuffer.remaining()
-            val uBufferSize = uBuffer.remaining()
-            val vBufferSize = vBuffer.remaining()
-            
-            Log.d(TAG, "[Camera2Helper] Buffer sizes - Y: $yBufferSize, U: $uBufferSize, V: $vBufferSize")
-            Log.d(TAG, "[Camera2Helper] Strides - UV row: $uRowStride, UV pixel: $uPixelStride")
-            
-            // Copy Y plane
-            if (yPixelStride == 1) {
-                // Fast path for contiguous data
-                yBuffer.get(nv21, 0, ySize)
-            } else {
-                // Slow path for non-contiguous data
-                var position = 0
-                for (row in 0 until height) {
-                    var rowOffset = row * yRowStride
-                    for (col in 0 until width) {
-                        nv21[position++] = yBuffer.get(rowOffset)
-                        rowOffset += yPixelStride
-                    }
-                }
-            }
-            
-            // Copy UV data
-            var position = ySize
-            if (uPixelStride == 2 && vPixelStride == 2) {
-                // Fast path for standard NV21 format
-                var row = 0
-                while (row < height / 2) {
-                    var offset = row * uRowStride
-                    for (col in 0 until width / 2) {
-                        nv21[position++] = vBuffer.get(offset)  // V first for NV21
-                        nv21[position++] = uBuffer.get(offset)  // then U
-                        offset += uPixelStride
-                    }
-                    row++
-                }
-            } else {
-                // Slow path for non-standard format
-                var row = 0
-                while (row < height / 2) {
-                    var vOffset = row * vRowStride
-                    var uOffset = row * uRowStride
-                    for (col in 0 until width / 2) {
-                        nv21[position++] = vBuffer.get(vOffset)  // V first for NV21
-                        nv21[position++] = uBuffer.get(uOffset)  // then U
-                        vOffset += vPixelStride
-                        uOffset += uPixelStride
-                    }
-                    row++
-                }
-            }
-            
-            Log.d(TAG, "[Camera2Helper] YUV conversion complete, buffer size: ${nv21.size}, image dimensions: ${width}x${height}")
-            return nv21
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "[Camera2Helper] Error converting YUV to NV21", e)
-            return ByteArray(0)
-        }
-    }
-
+    // Hole alle verfügbaren Kamera-Konfigurationen
     fun getCameraConfigurations(): String {
         val configs = JSONArray()
+        
         try {
             val cameraIds = cameraManager.cameraIdList
             
@@ -434,7 +561,7 @@ class Camera2Helper(private val context: Context) {
                 var metaCameraSource = -1
                 
                 try {
-                    // Meta-spezifische Vendor-Tags
+                    // Meta-spezifische Vendor-Tags (wie im Meta-Beispiel)
                     val metaCameraPositionKey = CameraCharacteristics.Key("com.meta.extra_metadata.position", Int::class.javaObjectType)
                     val metaCameraSourceKey = CameraCharacteristics.Key("com.meta.extra_metadata.camera_source", Int::class.javaObjectType)
                     
@@ -466,6 +593,9 @@ class Camera2Helper(private val context: Context) {
 
     fun setImageCallback(callback: ImageCallback) {
         Log.d(TAG, "[Camera2Helper] Setting image callback.")
+        if (!isInitialized) {
+            Log.e(TAG, "[Camera2Helper] Cannot set callback - not initialized!")
+        }
         imageCallback = callback
     }
 
@@ -479,15 +609,15 @@ class Camera2Helper(private val context: Context) {
     }
 
     fun switchCamera() {
-        Log.w(TAG, "[Camera2Helper] switchCamera() called in Kotlin. This should be handled in Unity by stopping, re-initializing with new ID, and starting.")
+        Log.e(TAG, "[Camera2Helper] switchCamera() is not supported. Use Unity-side camera switching instead.")
     }
 
     fun startPeriodicCameraSwitch(intervalMs: Long = 5000) {
-         Log.w(TAG, "[Camera2Helper] startPeriodicCameraSwitch called in Kotlin. This should be handled in Unity.")
+        Log.e(TAG, "[Camera2Helper] startPeriodicCameraSwitch is not supported. Use Unity-side camera switching instead.")
     }
 
     fun stopPeriodicCameraSwitch() {
-         Log.w(TAG, "[Camera2Helper] stopPeriodicCameraSwitch called in Kotlin. This should be handled in Unity.")
+        Log.e(TAG, "[Camera2Helper] stopPeriodicCameraSwitch is not supported. Use Unity-side camera switching instead.")
     }
 
     fun requestFrame() {
@@ -496,5 +626,106 @@ class Camera2Helper(private val context: Context) {
 
     fun getCurrentCameraId(): String? {
         return currentCameraId
+    }
+
+    // Neue Methode zum Auflisten aller Kameras im Log
+    fun logAllCameras() {
+        try {
+            Log.d(TAG, "[Camera2Helper] ===== ALLE VERFÜGBAREN KAMERAS =====")
+            val cameraIds = cameraManager.cameraIdList
+            
+            if (cameraIds.isEmpty()) {
+                Log.d(TAG, "[Camera2Helper] Keine Kameras gefunden!")
+                return
+            }
+            
+            Log.d(TAG, "[Camera2Helper] Gefundene Kameras: ${cameraIds.size}")
+            
+            for (cameraId in cameraIds) {
+                Log.d(TAG, "[Camera2Helper] ------------------------------")
+                Log.d(TAG, "[Camera2Helper] Kamera ID: $cameraId")
+                
+                val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+                
+                // Kamera-Ausrichtung
+                val facing = characteristics.get(CameraCharacteristics.LENS_FACING)
+                val facingStr = when (facing) {
+                    CameraCharacteristics.LENS_FACING_FRONT -> "FRONT"
+                    CameraCharacteristics.LENS_FACING_BACK -> "BACK"
+                    CameraCharacteristics.LENS_FACING_EXTERNAL -> "EXTERNAL"
+                    else -> "UNKNOWN"
+                }
+                Log.d(TAG, "[Camera2Helper] Ausrichtung: $facingStr")
+                
+                // Verfügbare Auflösungen
+                val configMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val sizes = configMap?.getOutputSizes(ImageFormat.YUV_420_888)
+                Log.d(TAG, "[Camera2Helper] Verfügbare Auflösungen (YUV_420_888):")
+                sizes?.forEach { size ->
+                    Log.d(TAG, "[Camera2Helper]   ${size.width} x ${size.height}")
+                }
+                
+                // Meta-spezifische Metadaten
+                try {
+                    val allTags = characteristics.keys
+                    Log.d(TAG, "[Camera2Helper] Alle verfügbaren Tags:")
+                    allTags.forEach { key ->
+                        Log.d(TAG, "[Camera2Helper]   ${key.name} (${key.id})")
+                    }
+                    
+                    // Versuche, Meta-spezifische Tags zu finden
+                    try {
+                        val metaCameraPositionKey = CameraCharacteristics.Key("com.meta.extra_metadata.position", Int::class.javaObjectType)
+                        val metaCameraSourceKey = CameraCharacteristics.Key("com.meta.extra_metadata.camera_source", Int::class.javaObjectType)
+                        
+                        val position = characteristics.get(metaCameraPositionKey)
+                        val source = characteristics.get(metaCameraSourceKey)
+                        
+                        Log.d(TAG, "[Camera2Helper] Meta Position: $position (0=Left, 1=Right)")
+                        Log.d(TAG, "[Camera2Helper] Meta Source: $source (0=Passthrough)")
+                    } catch (e: Exception) {
+                        Log.d(TAG, "[Camera2Helper] Meta-spezifische Tags nicht gefunden: ${e.message}")
+                    }
+                    
+                    // Versuche, alle Vendor-Tags zu finden
+                    try {
+                        val vendorTags = characteristics.keys.filter { it.name.startsWith("com.") }
+                        Log.d(TAG, "[Camera2Helper] Vendor-Tags:")
+                        vendorTags.forEach { key ->
+                            val value = characteristics.get(key)
+                            Log.d(TAG, "[Camera2Helper]   ${key.name}: $value")
+                        }
+                    } catch (e: Exception) {
+                        Log.d(TAG, "[Camera2Helper] Fehler beim Lesen der Vendor-Tags: ${e.message}")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "[Camera2Helper] Fehler beim Lesen der Kamera-Metadaten: ${e.message}")
+                }
+            }
+            Log.d(TAG, "[Camera2Helper] ===== ENDE DER KAMERALISTE =====")
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Fehler beim Auflisten der Kameras: ${e.message}", e)
+        }
+    }
+
+    private fun checkCameraCapabilities(cameraId: String) {
+        try {
+            val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+            
+            // Prüfe verfügbare Belichtungsmodi
+            val aeAvailableModes = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES)
+            Log.d(TAG, "[Camera2Helper] Available AE modes: ${aeAvailableModes?.joinToString()}")
+            
+            // Prüfe ISO-Bereich
+            val isoRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE)
+            Log.d(TAG, "[Camera2Helper] ISO range: $isoRange")
+            
+            // Prüfe Belichtungszeit-Bereich
+            val exposureRange = characteristics.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE)
+            Log.d(TAG, "[Camera2Helper] Exposure time range: $exposureRange")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "[Camera2Helper] Failed to check camera capabilities: ${e.message}")
+        }
     }
 }

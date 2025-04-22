@@ -173,7 +173,8 @@ namespace TryAR.Camera
                     }
                     
                     Debug.Log("[Camera2Helper] Starting camera capture...");
-                    _camera2Helper.Call("startCamera");
+                    string currentId = _camera2Helper.Call<string>("getCurrentCameraId");
+                    _camera2Helper.Call("startCamera", currentId);
                     _isCameraRunning = true;
                 }
                 else
@@ -297,6 +298,27 @@ namespace TryAR.Camera
             if (_camera2Helper != null)
             {
                 Debug.Log("[Camera2Helper] Frame wird automatisch durch kontinuierlichen Stream geliefert");
+            }
+        }
+
+        // Methode zum Auflisten aller Kameras im Log
+        public static void LogAllCameras()
+        {
+            if (_camera2Helper != null)
+            {
+                try
+                {
+                    _camera2Helper.Call("logAllCameras");
+                    Debug.Log("[Camera2Helper] Requested camera list in logs");
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"[Camera2Helper] Failed to log cameras: {e.Message}");
+                }
+            }
+            else
+            {
+                Debug.LogError("[Camera2Helper] Cannot log cameras - plugin not initialized");
             }
         }
     }

@@ -7,7 +7,7 @@ using System.Linq;
 
 public class CameraManager : MonoBehaviour
 {
-    [SerializeField] private bool _useFrontCamera = false;
+    [SerializeField] private PassthroughCameraEye _eye = PassthroughCameraEye.Left;
     [SerializeField] private Material _previewMaterial;
     [SerializeField] private bool _autoSwitchOnStart = false;
     [SerializeField] private float _autoSwitchInterval = 5f;
@@ -26,9 +26,34 @@ public class CameraManager : MonoBehaviour
     private int _lastFrameWidth;
     private int _lastFrameHeight;
 
+    private int _frameCount = 0;  // Zum Tracking der empfangenen Frames
+
+    private static int _instanceCount = 0;
+    private int _instanceId;
+
     private void Awake()
     {
-        Debug.Log("[Camera2Helper] CameraManager starting...");
+        _instanceId = _instanceCount++;
+        Debug.Log($"[Camera2Helper] CameraManager {_instanceId} starting for {_eye} eye...");
+        
+        // Verzögere den Start der zweiten Kamera
+        if (_instanceId > 0)
+        {
+            StartCoroutine(DelayedStart());
+        }
+        else
+        {
+#if UNITY_ANDROID
+            CameraPermissions.AskCameraPermissions();
+#endif
+        }
+    }
+
+    private IEnumerator DelayedStart()
+    {
+        // Warte bis die erste Kamera initialisiert ist
+        yield return new WaitForSeconds(3f);
+        
 #if UNITY_ANDROID
         CameraPermissions.AskCameraPermissions();
 #endif
@@ -74,7 +99,8 @@ public class CameraManager : MonoBehaviour
             int height = 960;
             
             // Erstelle eine Textur für die Vorschau
-            _previewTexture = new Texture2D(width, height, TextureFormat.RGB24, false);
+            _previewTexture = new Texture2D(width, height, TextureFormat.RGB24, false, true);
+            _previewTexture.filterMode = FilterMode.Bilinear;
             Debug.Log($"[Camera2Helper] Creating texture with format: {_previewTexture.format}");
             
             // Setze die Textur im Material
@@ -84,7 +110,7 @@ public class CameraManager : MonoBehaviour
             }
             
             // Initialisiere die Kamera mit der gewünschten Auflösung und Kamera (links/rechts)
-            PassthroughCameraEye eye = _useFrontCamera ? PassthroughCameraEye.Left : PassthroughCameraEye.Right;
+            PassthroughCameraEye eye = _eye;
             NativeCameraPlugin.Initialize(width, height, eye);
             
             // Registriere den Callback für Bilddaten
@@ -96,11 +122,14 @@ public class CameraManager : MonoBehaviour
             // Erstelle eine Instanz für Methoden wie SwitchCamera
             cameraPlugin = new NativeCameraPlugin();
             
-            // Starte automatischen Kamerawechsel, falls gewünscht
-            if (_autoSwitchOnStart)
-            {
-                StartAutoSwitch(_autoSwitchInterval);
-            }
+            // Entferne den automatischen Kamerawechsel
+            // if (_autoSwitchOnStart)
+            // {
+            //     StartAutoSwitch(_autoSwitchInterval);
+            // }
+            
+            // Stattdessen: Liste alle verfügbaren Kameras im Log auf
+            NativeCameraPlugin.LogAllCameras();
         }
         catch (Exception e)
         {
@@ -236,26 +265,6 @@ public class CameraManager : MonoBehaviour
         }
     }
 
-    public void StartAutoSwitch(float intervalSeconds = 5f)
-    {
-        if (cameraPlugin != null)
-        {
-            isAutoSwitchEnabled = true;
-            cameraPlugin.StartPeriodicCameraSwitch((long)(intervalSeconds * 1000));
-            Debug.Log($"[CameraManager] Started auto camera switch every {intervalSeconds} seconds");
-        }
-    }
-
-    public void StopAutoSwitch()
-    {
-        if (cameraPlugin != null)
-        {
-            isAutoSwitchEnabled = false;
-            cameraPlugin.StopPeriodicCameraSwitch();
-            Debug.Log("[CameraManager] Stopped auto camera switch");
-        }
-    }
-
     public void SwitchCamera()
     {
         if (!_isRunning) return;
@@ -264,22 +273,24 @@ public class CameraManager : MonoBehaviour
         NativeCameraPlugin.StopCamera();
         
         // Wechsle die Kamera-Einstellung
-        _useFrontCamera = !_useFrontCamera;
+        _eye = _eye == PassthroughCameraEye.Left ? PassthroughCameraEye.Right : PassthroughCameraEye.Left;
         
         // Initialize with new camera - Konvertiere bool zu PassthroughCameraEye
-        PassthroughCameraEye eye = _useFrontCamera ? PassthroughCameraEye.Left : PassthroughCameraEye.Right;
+        PassthroughCameraEye eye = _eye;
         NativeCameraPlugin.Initialize(_previewTexture.width, _previewTexture.height, eye);
         StartCamera();
         
-        Debug.Log($"[Camera2Helper] Camera switch complete. Now using {(_useFrontCamera ? "left" : "right")} camera");
+        Debug.Log($"[Camera2Helper] Camera switch complete. Now using {_eye} camera");
     }
 
     private void OnDisable()
     {
-        if (isAutoSwitchEnabled)
-        {
-            StopAutoSwitch();
-        }
+        // Entferne den Aufruf von StopAutoSwitch
+        // if (isAutoSwitchEnabled)
+        // {
+        //     StopAutoSwitch();
+        // }
+        
         if (_isRunning)
         {
             NativeCameraPlugin.StopCamera();
@@ -293,7 +304,11 @@ public class CameraManager : MonoBehaviour
         
         if (data != null && data.Length > 0)
         {
-            Debug.Log($"[Camera2Helper] Got frame: {width}x{height}, size: {data.Length} bytes");
+            _frameCount++;
+            if (_frameCount % 30 == 0) // Log every 30 frames
+            {
+                Debug.Log($"[Camera2Helper] {_eye}: Frame {_frameCount}, size: {width}x{height}");
+            }
             
             // Speichere den letzten erfolgreichen Frame
             _lastFrameData = data;
@@ -303,17 +318,13 @@ public class CameraManager : MonoBehaviour
             // Aktualisiere die Textur
             try 
             {
-                // Prüfe, ob die Textur die richtige Größe hat
-                if (_previewTexture.width != width || _previewTexture.height != height)
+                if (_previewTexture == null || _previewTexture.width != width || _previewTexture.height != height)
                 {
-                    Debug.Log($"[Camera2Helper] Resizing texture to {width}x{height}");
-                    _previewTexture.Reinitialize(width, height);
+                    CreateTexture(width, height);
                 }
                 
-                // Lade die Daten in die Textur
                 _previewTexture.LoadRawTextureData(data);
                 _previewTexture.Apply();
-                Debug.Log("[Camera2Helper] Frame applied to texture");
             }
             catch (Exception e)
             {
@@ -323,6 +334,18 @@ public class CameraManager : MonoBehaviour
         else
         {
             Debug.LogWarning("[Camera2Helper] Received empty frame");
+        }
+    }
+
+    private void CreateTexture(int width, int height)
+    {
+        if (_previewTexture == null || _previewTexture.width != width || _previewTexture.height != height)
+        {
+            // Wichtig: Linear und kein sRGB für YUV Daten
+            _previewTexture = new Texture2D(width, height, TextureFormat.RGB24, false, true);
+            _previewTexture.filterMode = FilterMode.Bilinear;
+            _previewMaterial.mainTexture = _previewTexture;
+            Debug.Log($"[Camera2Helper] Creating texture with format: {_previewTexture.format}");
         }
     }
 } 
