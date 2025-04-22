@@ -3392,6 +3392,7 @@ GameObject:
   - component: {fileID: 546589280}
   - component: {fileID: 546589279}
   - component: {fileID: 546589281}
+  - component: {fileID: 546589282}
   m_Layer: 0
   m_Name: ArUcoMarkerTracking
   m_TagString: Untagged
@@ -3509,6 +3510,21 @@ MonoBehaviour:
   _useBothCameras: 1
   _leftCameraPreview: {fileID: 2112737596}
   _rightCameraPreview: {fileID: 1902647626}
+--- !u!114 &546589282
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 546589273}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4626cae36ee4fa14f8ad1a3addb9ce27, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _useBothCameras: 1
+  _targetFrameRate: 30
+  _recordingResolution: {x: 1280, y: 720}
 --- !u!1 &550324989
 GameObject:
   m_ObjectHideFlags: 0
