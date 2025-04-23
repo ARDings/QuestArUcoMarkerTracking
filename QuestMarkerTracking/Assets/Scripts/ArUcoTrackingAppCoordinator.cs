@@ -39,25 +39,16 @@ namespace TryAR.MarkerTracking
             public GameObject gameObject;
         }
 
-        [Header("Camera Texture View")]
-        [SerializeField] private WebCamTextureManager m_webCamTextureManager;
-        private PassthroughCameraEye CameraEye => m_webCamTextureManager.Eye;
-        private Vector2Int CameraResolution => m_webCamTextureManager.RequestedResolution;
+        [Header("Camera")]
+        [SerializeField] private SimpleCameraPreview m_cameraPreview;
+        private PassthroughCameraEye CameraEye => PassthroughCameraEye.Left;
         [SerializeField] private Transform m_cameraAnchor;
-   
-        [SerializeField] private Canvas m_cameraCanvas;
-        [SerializeField] private RawImage m_resultRawImage;
-        [SerializeField] private float m_canvasDistance = 1f;
 
         [Header("Marker Tracking")]
         [SerializeField] private ArUcoMarkerTracking m_arucoMarkerTracking;
         [SerializeField, Tooltip("List of marker IDs mapped to their corresponding GameObjects")]
         private List<MarkerGameObjectPair> m_markerGameObjectPairs = new List<MarkerGameObjectPair>();
         private Dictionary<int, GameObject> m_markerGameObjectDictionary = new Dictionary<int, GameObject>();
-        private bool m_showCameraCanvas = true;
-
-        private Texture2D m_resultTexture;        // Für Marker-Tracking
-        private Texture2D m_colorDebugTexture;    // Für Ball-Tracking
 
         [Header("Object Spawning")]
         [SerializeField] private Transform m_spawnedObjectsContainer;
@@ -107,85 +98,25 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private IEnumerator Start()
         {
-            // Validate required components
-            if (m_webCamTextureManager == null)
+            if (m_cameraPreview == null)
             {
-                Debug.LogError($"PCA: {nameof(m_webCamTextureManager)} field is required " +
-                            $"for the component {nameof(ArUcoTrackingAppCoordinator)} to operate properly");
+                Debug.LogError($"PCA: {nameof(m_cameraPreview)} field is required");
                 enabled = false;
                 yield break;
             }
 
-            // Wait for camera permissions
-            Assert.IsFalse(m_webCamTextureManager.enabled);
-            yield return WaitForCameraPermission();
+            while (!m_cameraPreview.AreCamerasReady)
+            {
+                yield return null;
+            }
 
-            // Initialize camera
-            yield return InitializeCamera();
-
-            // Configure UI and tracking components
-            ScaleCameraCanvas();
-            
-            //======================================================================================
-            // CORE SETUP: Initialize the marker tracking system with camera parameters
-            // This configures the ArUco detection with proper camera calibration values
-            // and prepares the marker-to-GameObject mapping dictionary
-            //======================================================================================
             InitializeMarkerTracking();
-            
-            // Initialisiere den Pink Ball mit den eingestellten HSV-Werten
+            SetMarkerObjectsVisibility(true);
+
+            // Initialisiere Ball-Tracking
             m_pinkBall = new ColorObject("pink");
             UpdatePinkHSVValues();
             InitializeBallTracking();
-            
-            // Set initial visibility states
-            m_cameraCanvas.gameObject.SetActive(m_showCameraCanvas);
-            SetMarkerObjectsVisibility(!m_showCameraCanvas);
-            if (m_ballVisualization != null)
-            {
-                m_ballVisualization.SetActive(!m_showCameraCanvas);
-            }
-        }
-
-        /// <summary>
-        /// Waits until camera permission is granted.
-        /// </summary>
-        private IEnumerator WaitForCameraPermission()
-        {
-            while (PassthroughCameraPermissions.HasCameraPermission != true)
-            {
-                yield return null;
-            }
-        }
-
-        /// <summary>
-        /// Initializes the camera with appropriate resolution and waits until ready.
-        /// </summary>
-        private IEnumerator InitializeCamera()
-        {
-            // Hole die native Auflösung
-            var nativeResolution = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye).Resolution;
-            
-            // Reduziere die angeforderte Auflösung mit m_processingDivider
-            Vector2Int requestedResolution = new Vector2Int(
-                nativeResolution.x / m_processingDivider,
-                nativeResolution.y / m_processingDivider
-            );
-
-            Debug.Log($"Requesting camera resolution: {requestedResolution.x}x{requestedResolution.y} " +
-                      $"(native: {nativeResolution.x}x{nativeResolution.y})");
-
-            // Setze die reduzierte Auflösung
-            m_webCamTextureManager.RequestedResolution = requestedResolution;
-            m_webCamTextureManager.enabled = true;
-
-            // Warte bis die Kamera-Textur verfügbar ist
-            while(m_webCamTextureManager.WebCamTexture == null)
-            {
-                yield return null;
-            }
-
-            Debug.Log($"Actual camera resolution: {m_webCamTextureManager.WebCamTexture.width}x{m_webCamTextureManager.WebCamTexture.height}");
         }
 
         /// <summary>
@@ -193,64 +124,29 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void Update()
         {
-            if (m_webCamTextureManager.WebCamTexture == null)
-                return;
+            if (!m_cameraPreview.AreCamerasReady) return;
 
-            // Toggle zwischen Kamera-Ansicht und AR-Visualisierung
-            HandleVisualizationToggle();
             UpdateCameraPoses();
 
-            // Verarbeite aktive Tracking-Modi
             if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
             {
-                ProcessMarkerTracking();
-               // HandleObjectSpawningAndDeletion();
+                m_arucoMarkerTracking.DetectMarker(m_cameraPreview.LeftCameraTexture);
+                
+                if (m_markerGameObjectDictionary.Count > 0)
+                {
+                    m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
+                        m_markerGameObjectDictionary,
+                        m_cameraAnchor
+                    );
+                }
             }
 
             if (m_enableColorTracking)
             {
-                ProcessBallTracking(m_webCamTextureManager.WebCamTexture);
+                ProcessBallTracking(m_cameraPreview.LeftCameraTexture);
             }
 
-            // HSV-Werte mit Controller anpassen
             UpdateHSVControls();
-        }
-
-        /// <summary>
-        /// Handles button input to toggle between camera view and AR visualization.
-        /// </summary>
-        private void HandleVisualizationToggle()
-        {
-            if (OVRInput.GetDown(OVRInput.Button.One))
-            {
-                m_showCameraCanvas = !m_showCameraCanvas;
-                m_cameraCanvas.gameObject.SetActive(m_showCameraCanvas);
-                
-                // Zeige/Verstecke je nach Modus
-                if (m_enableMarkerTracking)
-                {
-                SetMarkerObjectsVisibility(!m_showCameraCanvas);
-                }
-                if (m_enableColorTracking && m_ballVisualization != null)
-                {
-                    m_ballVisualization.SetActive(!m_showCameraCanvas);
-                }
-            }
-        }
-
-        /// <summary>
-        /// Performs marker detection and pose estimation.
-        /// This is the core functionality that processes camera frames to detect markers
-        /// and position virtual objects in 3D space.
-        /// </summary>
-        private void ProcessMarkerTracking()
-        {
-            // Step 1: Detect ArUco markers in the current camera frame
-            m_arucoMarkerTracking.DetectMarker(m_webCamTextureManager.WebCamTexture, m_resultTexture);
-            
-            // Step 2: Estimate the pose of markers and position 3D objects accordingly
-            // This maps the 2D marker positions to 3D space using the camera parameters
-            m_arucoMarkerTracking.EstimatePoseCanonicalMarker(m_markerGameObjectDictionary, m_cameraAnchor);
         }
 
         /// <summary>
@@ -259,7 +155,6 @@ namespace TryAR.MarkerTracking
         /// <param name="isVisible">Whether the marker objects should be visible or not.</param>
         private void SetMarkerObjectsVisibility(bool isVisible)
         {
-            // Toggle visibility for all GameObjects in the marker dictionary
             foreach (var markerObject in m_markerGameObjectDictionary.Values)
             {
                 if (markerObject != null)
@@ -282,7 +177,6 @@ namespace TryAR.MarkerTracking
         {
             var nativeIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
             
-            // Skaliere die Kamera-Parameter mit m_processingDivider
             var cx = nativeIntrinsics.PrincipalPoint.x / m_processingDivider;
             var cy = nativeIntrinsics.PrincipalPoint.y / m_processingDivider;
             var fx = nativeIntrinsics.FocalLength.x / m_processingDivider;
@@ -290,15 +184,8 @@ namespace TryAR.MarkerTracking
             var width = nativeIntrinsics.Resolution.x / m_processingDivider;
             var height = nativeIntrinsics.Resolution.y / m_processingDivider;
             
-            // Initialisiere ArUco mit skalierten Parametern
             m_arucoMarkerTracking.Initialize(width, height, cx, cy, fx, fy);
-            
-            // Step 2: Build marker dictionary from serialized list
-            // This maps marker IDs to the GameObjects that should be positioned at each marker
             BuildMarkerDictionary();
-            
-            // Step 3: Set up texture for visualization
-            ConfigureResultTexture(width, height);
         }
 
         /// <summary>
@@ -317,75 +204,35 @@ namespace TryAR.MarkerTracking
         }
 
         /// <summary>
-        /// Configures the texture for displaying camera and tracking results.
-        /// </summary>
-        /// <param name="width">Width of the camera resolution</param>
-        /// <param name="height">Height of the camera resolution</param>
-        private void ConfigureResultTexture(int width, int height)
-        {
-            int divideNumber = m_arucoMarkerTracking.DivideNumber;
-            m_resultTexture = new Texture2D(width/divideNumber, height/divideNumber, TextureFormat.RGB24, false);
-            m_resultRawImage.texture = m_resultTexture;
-        }
-
-        /// <summary>
-        /// Calculates the dimensions of the canvas based on the distance from the camera origin and the camera resolution.
-        /// </summary>
-        private void ScaleCameraCanvas()
-        {
-            var cameraCanvasRectTransform = m_cameraCanvas.GetComponentInChildren<RectTransform>();
-            
-            // Calculate field of view based on camera parameters
-            var leftSidePointInCamera = PassthroughCameraUtils.ScreenPointToRayInCamera(CameraEye, new Vector2Int(0, CameraResolution.y / 2));
-            var rightSidePointInCamera = PassthroughCameraUtils.ScreenPointToRayInCamera(CameraEye, new Vector2Int(CameraResolution.x, CameraResolution.y / 2));
-            var horizontalFoVDegrees = Vector3.Angle(leftSidePointInCamera.direction, rightSidePointInCamera.direction);
-            var horizontalFoVRadians = horizontalFoVDegrees / 180 * Math.PI;
-            
-            // Calculate canvas size to match camera view
-            var newCanvasWidthInMeters = 2 * m_canvasDistance * Math.Tan(horizontalFoVRadians / 2);
-            var localScale = (float)(newCanvasWidthInMeters / cameraCanvasRectTransform.sizeDelta.x);
-            cameraCanvasRectTransform.localScale = new Vector3(localScale, localScale, localScale);
-        }
-
-        /// <summary>
         /// Updates the positions and rotations of camera-related transforms based on head and camera poses.
         /// </summary>
         private void UpdateCameraPoses()
         {
-            // Get current head pose
             var headPose = OVRPlugin.GetNodePoseStateImmediate(OVRPlugin.Node.Head).Pose.ToOVRPose();
-            
-            // Update camera anchor position and rotation
             var cameraPose = PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye);
             m_cameraAnchor.position = cameraPose.position;
             m_cameraAnchor.rotation = cameraPose.rotation;
-
-            // Position the canvas in front of the camera
-            m_cameraCanvas.transform.position = cameraPose.position + cameraPose.rotation * Vector3.forward * m_canvasDistance;
-            m_cameraCanvas.transform.rotation = cameraPose.rotation;
         }
 
-        private void ProcessBallTracking(WebCamTexture webCamTexture)
+        private void ProcessBallTracking(RenderTexture renderTexture)
         {
             try
             {
-                Debug.Log("BallTracking: Starting frame processing...");
-                Debug.Log($"BallTracking: Camera resolution: {webCamTexture.width}x{webCamTexture.height}");
-
-                // Konvertiere WebCamTexture zu Mat
-                Mat rgbaMat = new Mat(webCamTexture.height, webCamTexture.width, CvType.CV_8UC4);
-                Utils.webCamTextureToMat(webCamTexture, rgbaMat);
-                Debug.Log($"BallTracking: Converted to Mat: {rgbaMat.width()}x{rgbaMat.height()}");
+                Mat rgbaMat = new Mat(renderTexture.height, renderTexture.width, CvType.CV_8UC4);
+                
+                RenderTexture.active = renderTexture;
+                Texture2D tempTex = new Texture2D(renderTexture.width, renderTexture.height, TextureFormat.RGBA32, false);
+                tempTex.ReadPixels(new UnityEngine.Rect(0, 0, renderTexture.width, renderTexture.height), 0, 0);
+                tempTex.Apply();
+                Utils.texture2DToMat(tempTex, rgbaMat);
+                Destroy(tempTex);
 
                 // Konvertiere zu RGB und dann zu HSV
                 Imgproc.cvtColor(rgbaMat, m_rgbMat, Imgproc.COLOR_RGBA2RGB);
                 Imgproc.cvtColor(m_rgbMat, m_hsvMat, Imgproc.COLOR_RGB2HSV);
-                Debug.Log("BallTracking: Converted to HSV color space");
 
                 // Finde pinke Objekte
                 Core.inRange(m_hsvMat, m_pinkBall.getHSVmin(), m_pinkBall.getHSVmax(), m_thresholdMat);
-                Debug.Log($"BallTracking: HSV Range - Min: {m_pinkBall.getHSVmin().val[0]},{m_pinkBall.getHSVmin().val[1]},{m_pinkBall.getHSVmin().val[2]} " +
-                          $"Max: {m_pinkBall.getHSVmax().val[0]},{m_pinkBall.getHSVmax().val[1]},{m_pinkBall.getHSVmax().val[2]}");
 
                 // Morphologische Operationen
                 Mat erodeElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(3, 3));
@@ -395,43 +242,12 @@ namespace TryAR.MarkerTracking
                 Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
                 Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
                 Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
-                Debug.Log("BallTracking: Applied morphological operations");
 
                 // Finde Konturen
                 List<MatOfPoint> contours = new List<MatOfPoint>();
                 Mat hierarchy = new Mat();
                 Imgproc.findContours(m_thresholdMat, contours, hierarchy, 
                     Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
-                Debug.Log($"BallTracking: Found {contours.Count} contours");
-
-                // Zeige das Ergebnis im Debug-View
-                if (m_showColorDebugView && m_resultRawImage != null && m_resultRawImage.enabled)
-                {
-                    // Zeige das Schwellenwertbild
-                    if (m_colorDebugTexture == null || 
-                        m_colorDebugTexture.width != m_thresholdMat.width() || 
-                        m_colorDebugTexture.height != m_thresholdMat.height())
-                    {
-                        if (m_colorDebugTexture != null)
-                            Destroy(m_colorDebugTexture);
-                        m_colorDebugTexture = new Texture2D(m_thresholdMat.width(), m_thresholdMat.height(), 
-                            TextureFormat.RGBA32, false);
-                    }
-
-                    // Konvertiere das Schwellenwertbild zu RGBA für die Anzeige
-                    Mat debugMat = new Mat();
-                    Imgproc.cvtColor(m_thresholdMat, debugMat, Imgproc.COLOR_GRAY2RGBA);
-                    
-                    // Zeichne die Konturen
-                    foreach (var contour in contours)
-                    {
-                        Imgproc.drawContours(debugMat, contours, -1, new Scalar(0, 255, 0, 255), 2);
-                    }
-
-                    Utils.matToTexture2D(debugMat, m_colorDebugTexture);
-                    m_resultRawImage.texture = m_colorDebugTexture;  // Verwende die separate Debug-Texture
-                    debugMat.Dispose();
-                }
 
                 double maxArea = 0;
                 Point maxCenter = new Point();
@@ -465,8 +281,6 @@ namespace TryAR.MarkerTracking
                             currentRadius = Math.Max(currentRadius, distance);
                         }
 
-                        Debug.Log($"BallTracking: Found potential ball - Area: {area}, Radius: {currentRadius}");
-
                         // Wenn dies der bisher größte gefundene Kreis ist
                         if (area > maxArea)
                         {
@@ -480,8 +294,6 @@ namespace TryAR.MarkerTracking
                 // Wenn ein Ball gefunden wurde
                 if (maxArea > 0)
                 {
-                    Debug.Log($"BallTracking: Detected ball at ({maxCenter.x}, {maxCenter.y}) with radius {maxRadius}");
-
                     if (m_ballVisualization != null)
                     {
                         // WICHTIG: Hole die ORIGINALEN Kamera-Parameter, nicht die skalierten
@@ -536,10 +348,6 @@ namespace TryAR.MarkerTracking
                         m_ballVisualization.transform.position = finalPosition;
                         m_ballVisualization.transform.localScale = Vector3.one * m_ballDiameterInMeters * m_visualScaleFactor;
                     }
-                }
-                else
-                {
-                    Debug.Log("BallTracking: No ball detected in this frame");
                 }
 
                 // Aufräumen
@@ -689,16 +497,9 @@ namespace TryAR.MarkerTracking
 
         private void OnDestroy()
         {
-            // Cleanup für Ball-Tracking Ressourcen
             if (m_rgbMat != null) m_rgbMat.Dispose();
             if (m_hsvMat != null) m_hsvMat.Dispose();
             if (m_thresholdMat != null) m_thresholdMat.Dispose();
-            
-            // Cleanup für Texturen
-            if (m_resultTexture != null)
-                Destroy(m_resultTexture);
-            if (m_colorDebugTexture != null)
-                Destroy(m_colorDebugTexture);
         }
     }
 }

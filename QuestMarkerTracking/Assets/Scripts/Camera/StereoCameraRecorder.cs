@@ -2,6 +2,9 @@ using UnityEngine;
 using System.IO;
 using System;
 using Uralstech.UXR.QuestCamera;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Threading;
 
 public class StereoCameraRecorder : MonoBehaviour 
 {
@@ -21,10 +24,40 @@ public class StereoCameraRecorder : MonoBehaviour
     private bool _isRecording = false;
     private int _frameCount = 0;
 
+    private float _nextFrameTime = 0f;
+    private float _frameInterval;
+
+    private float _recordingStartTime;
+
+    // Wiederverwendbare Texturen
+    private Texture2D _leftReadbackTexture;
+    private Texture2D _rightReadbackTexture;
+    
+    // Für asynchrones Speichern
+    private System.Threading.Tasks.Task _saveTask;
+    private byte[] _leftJpgData;
+    private byte[] _rightJpgData;
+    private bool _isSaving = false;
+
+    // Frame-Buffer für parallele Verarbeitung
+    private const int BUFFER_SIZE = 4;
+    private struct FrameData
+    {
+        public byte[] leftJpgData;
+        public byte[] rightJpgData;
+        public int frameNumber;
+    }
+    private Queue<FrameData> _frameBuffer = new Queue<FrameData>();
+    private object _bufferLock = new object();
+    private Task _processingTask;
+    private CancellationTokenSource _cancellationSource = new CancellationTokenSource();
+
     private void Start()
     {
-        Application.targetFrameRate = _targetFrameRate;
-
+        _frameInterval = 1f / _targetFrameRate;
+        Application.targetFrameRate = 90; // Noch höhere Framerate für mehr Headroom
+        QualitySettings.vSyncCount = 0; // VSync ausschalten für bessere Performance
+        
         // Kamera-Berechtigungen prüfen/anfordern
         if (UnityEngine.Android.Permission.HasUserAuthorizedPermission(UCameraManager.HeadsetCameraPermission))
         {
@@ -55,6 +88,25 @@ public class StereoCameraRecorder : MonoBehaviour
         {
             _rightCameraInfo = UCameraManager.Instance.GetCamera(CameraInfo.CameraEye.Right);
         }
+
+        // Native Auflösung beibehalten
+        var nativeRes = _leftCameraInfo.SupportedResolutions[^1];
+        _recordingResolution = new Vector2Int(nativeRes.width, nativeRes.height);
+
+        // Texturen mit optimierten Settings
+        _leftReadbackTexture = new Texture2D(_recordingResolution.x, _recordingResolution.y, TextureFormat.RGB24, false, true);
+        _leftReadbackTexture.wrapMode = TextureWrapMode.Clamp;
+        _leftReadbackTexture.filterMode = FilterMode.Point;
+
+        if (_useBothCameras)
+        {
+            _rightReadbackTexture = new Texture2D(_recordingResolution.x, _recordingResolution.y, TextureFormat.RGB24, false, true);
+            _rightReadbackTexture.wrapMode = TextureWrapMode.Clamp;
+            _rightReadbackTexture.filterMode = FilterMode.Point;
+        }
+
+        // Start background processing
+        _processingTask = Task.Run(ProcessFrameBuffer, _cancellationSource.Token);
 
         StartCameras();
     }
@@ -87,50 +139,115 @@ public class StereoCameraRecorder : MonoBehaviour
         }
 
         _isRecording = true;
+        _recordingStartTime = Time.time;
         Debug.Log($"Started stereo recording to {_sessionFolder}");
     }
 
     private void Update()
     {
-        if (!_isRecording) return;
+        if (!_isRecording || _isSaving) return;
 
-        // Frames nur alle 1/targetFrameRate Sekunden aufnehmen
-        if (Time.frameCount % (60 / _targetFrameRate) != 0) return;
+        if (Time.time < _nextFrameTime) return;
+        _nextFrameTime = Time.time + _frameInterval;
 
-        // Linkes Auge aufnehmen
+        // Capture frames
         if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
         {
-            SaveTextureToFile(_leftCaptureSession.TextureConverter.FrameRenderTexture, 
-                Path.Combine(_sessionFolder, "left", $"frame_{_frameCount:D6}.jpg"));
+            CaptureFrames();
         }
+    }
 
-        // Rechtes Auge aufnehmen
+    private async void CaptureFrames()
+    {
+        if (_frameBuffer.Count >= BUFFER_SIZE) return; // Skip frame if buffer is full
+
+        _isSaving = true;
+
+        var frameData = new FrameData { frameNumber = _frameCount };
+
+        // Capture left eye
+        RenderTexture.active = _leftCaptureSession.TextureConverter.FrameRenderTexture;
+        _leftReadbackTexture.ReadPixels(new Rect(0, 0, _recordingResolution.x, _recordingResolution.y), 0, 0);
+        frameData.leftJpgData = _leftReadbackTexture.EncodeToJPG(95);
+
         if (_useBothCameras && _rightCaptureSession?.TextureConverter?.FrameRenderTexture != null)
         {
-            SaveTextureToFile(_rightCaptureSession.TextureConverter.FrameRenderTexture, 
-                Path.Combine(_sessionFolder, "right", $"frame_{_frameCount:D6}.jpg"));
+            RenderTexture.active = _rightCaptureSession.TextureConverter.FrameRenderTexture;
+            _rightReadbackTexture.ReadPixels(new Rect(0, 0, _recordingResolution.x, _recordingResolution.y), 0, 0);
+            frameData.rightJpgData = _rightReadbackTexture.EncodeToJPG(95);
+        }
+
+        RenderTexture.active = null;
+
+        // Add to buffer
+        lock (_bufferLock)
+        {
+            _frameBuffer.Enqueue(frameData);
         }
 
         _frameCount++;
+        _isSaving = false;
     }
 
-    private void SaveTextureToFile(RenderTexture rt, string filePath)
+    private async Task ProcessFrameBuffer()
     {
-        var tex = new Texture2D(rt.width, rt.height, TextureFormat.RGB24, false);
-        var currentRT = RenderTexture.active;
-        RenderTexture.active = rt;
-        tex.ReadPixels(new Rect(0, 0, rt.width, rt.height), 0, 0);
-        tex.Apply();
-        RenderTexture.active = currentRT;
+        while (!_cancellationSource.Token.IsCancellationRequested)
+        {
+            FrameData? frameData = null;
+            lock (_bufferLock)
+            {
+                if (_frameBuffer.Count > 0)
+                {
+                    frameData = _frameBuffer.Dequeue();
+                }
+            }
 
-        File.WriteAllBytes(filePath, tex.EncodeToJPG(95));
-        Destroy(tex);
+            if (frameData.HasValue)
+            {
+                try
+                {
+                    await File.WriteAllBytesAsync(
+                        Path.Combine(_sessionFolder, "left", $"frame_{frameData.Value.frameNumber:D6}.jpg"),
+                        frameData.Value.leftJpgData
+                    );
+
+                    if (_useBothCameras && frameData.Value.rightJpgData != null)
+                    {
+                        await File.WriteAllBytesAsync(
+                            Path.Combine(_sessionFolder, "right", $"frame_{frameData.Value.frameNumber:D6}.jpg"),
+                            frameData.Value.rightJpgData
+                        );
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogError($"Error saving frames: {e.Message}");
+                }
+            }
+            else
+            {
+                await Task.Delay(1); // Kurze Pause wenn Buffer leer
+            }
+        }
     }
 
     private void OnDestroy()
     {
+        _cancellationSource.Cancel();
+        try
+        {
+            _processingTask?.Wait(1000); // Warte max. 1 Sekunde auf Beendigung
+        }
+        catch { }
+        
         if (_isRecording)
         {
+            float recordingDuration = Time.time - _recordingStartTime;
+            float actualFrameRate = _frameCount / recordingDuration;
+            
+            Debug.Log($"Recording stopped. Duration: {recordingDuration:F1} seconds");
+            Debug.Log($"Frames captured: {_frameCount}, Average frame rate: {actualFrameRate:F1} fps");
+            
             // Sessions beenden
             _leftCaptureSession?.Destroy();
             _rightCaptureSession?.Destroy();
@@ -153,6 +270,10 @@ public class StereoCameraRecorder : MonoBehaviour
                 "-s 4096x2048 " + // Finale Auflösung für Quest 3
                 "stereo_final.mp4"
             );
+
+            // Cleanup textures
+            if (_leftReadbackTexture != null) Destroy(_leftReadbackTexture);
+            if (_rightReadbackTexture != null) Destroy(_rightReadbackTexture);
         }
     }
 } 

@@ -7,6 +7,7 @@ using OpenCVForUnity.UnityUtils.Helper;
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using Rect = OpenCVForUnity.CoreModule.Rect;
 
 namespace TryAR.MarkerTracking
 {
@@ -208,49 +209,43 @@ namespace TryAR.MarkerTracking
         }
 
         /// <summary>
-        /// Detect ArUco markers in the provided webcam texture
+        /// Detect ArUco markers in the provided camera texture
         /// </summary>
-        /// <param name="webCamTexture">Input webcam texture</param>
-        /// <param name="resultTexture">Optional output texture for visualization</param>
-        public void DetectMarker(WebCamTexture webCamTexture, Texture2D resultTexture = null)
+        /// <param name="cameraTexture">Input camera RenderTexture</param>
+        public void DetectMarker(RenderTexture cameraTexture)
         {
-            if (_isReady)
+            if (!_isReady || cameraTexture == null)
             {
-                if (webCamTexture == null)
-                {
-                    return;
-                }
-                
-                // Get image from webcam at full size
-                Utils.webCamTextureToMat(webCamTexture, _originalWebcamMat);
-                
-                // Resize for processing
-                Imgproc.resize(_originalWebcamMat, _halfSizeMat, _halfSizeMat.size());
-                
-                // Convert to RGB for ArUco processing
-                Imgproc.cvtColor(_halfSizeMat, _processingRgbMat, Imgproc.COLOR_RGBA2RGB);
+                return;
+            }
 
-              
-                // Reset detection containers
-                _detectedMarkerIds.create(0, 1, CvType.CV_32S);
-                _detectedMarkerCorners.Clear();
-                _rejectedMarkerCandidates.Clear();
-                
-                // Detect markers
-                arucoDetector.detectMarkers(_processingRgbMat, _detectedMarkerCorners, _detectedMarkerIds, _rejectedMarkerCandidates);
-                
-                // Draw detected markers for visualization
-                if (_detectedMarkerCorners.Count == _detectedMarkerIds.total() || _detectedMarkerIds.total() == 0){
-                    Objdetect.drawDetectedMarkers(_processingRgbMat, _detectedMarkerCorners, _detectedMarkerIds, new Scalar(0, 255, 0));
-                }
-                        
-                 
+            // Konvertiere RenderTexture zu Mat
+            RenderTexture.active = cameraTexture;
+            Texture2D tempTex = new Texture2D(cameraTexture.width, cameraTexture.height, TextureFormat.RGBA32, false);
+            tempTex.ReadPixels(new UnityEngine.Rect(0, 0, cameraTexture.width, cameraTexture.height), 0, 0);
+            tempTex.Apply();
+            
+            Utils.texture2DToMat(tempTex, _originalWebcamMat);
+            Destroy(tempTex); // Cleanup
 
-                // Update result texture for visualization
-                if (resultTexture != null)
-                {
-                    Utils.matToTexture2D(_processingRgbMat, resultTexture);
-                }
+            // Resize für die Verarbeitung
+            Imgproc.resize(_originalWebcamMat, _halfSizeMat, _halfSizeMat.size());
+            
+            // Konvertiere zu RGB für ArUco-Verarbeitung
+            Imgproc.cvtColor(_halfSizeMat, _processingRgbMat, Imgproc.COLOR_RGBA2RGB);
+
+            // Reset detection containers
+            _detectedMarkerIds.create(0, 1, CvType.CV_32S);
+            _detectedMarkerCorners.Clear();
+            _rejectedMarkerCandidates.Clear();
+            
+            // Detect markers
+            arucoDetector.detectMarkers(_processingRgbMat, _detectedMarkerCorners, _detectedMarkerIds, _rejectedMarkerCandidates);
+            
+            // Draw detected markers for visualization (optional)
+            if (_detectedMarkerCorners.Count == _detectedMarkerIds.total() || _detectedMarkerIds.total() == 0)
+            {
+                Objdetect.drawDetectedMarkers(_processingRgbMat, _detectedMarkerCorners, _detectedMarkerIds, new Scalar(0, 255, 0));
             }
         }
 

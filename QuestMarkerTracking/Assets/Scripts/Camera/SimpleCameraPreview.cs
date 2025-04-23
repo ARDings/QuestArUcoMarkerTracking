@@ -7,11 +7,29 @@ public class SimpleCameraPreview : MonoBehaviour
     [Tooltip("Use both cameras instead of just left camera")]
     [SerializeField] private bool _useBothCameras = false;
 
+    [Tooltip("Enable preview display (set to false if you only need camera data without UI)")]
+    [SerializeField] private bool _enablePreviewDisplay = true;
+
     [Tooltip("Preview to show the left camera feed")]
     [SerializeField] private RawImage _leftCameraPreview;
 
     [Tooltip("Preview to show the right camera feed (only used if useBothCameras is true)")]
     [SerializeField] private RawImage _rightCameraPreview;
+
+    // Füge öffentliche Eigenschaften hinzu, um Zugriff auf die Texturen zu ermöglichen
+    public RenderTexture LeftCameraTexture => _leftCaptureSession?.TextureConverter?.FrameRenderTexture;
+    public RenderTexture RightCameraTexture => _rightCaptureSession?.TextureConverter?.FrameRenderTexture;
+    
+    // Füge eine Eigenschaft hinzu, um zu prüfen ob die Kameras bereit sind
+    public bool AreCamerasReady => _leftCaptureSession?.TextureConverter?.FrameRenderTexture != null;
+
+    // Füge Resolution-Property hinzu
+    public Vector2Int Resolution => 
+        _leftCaptureSession?.TextureConverter?.FrameRenderTexture != null 
+            ? new Vector2Int(
+                _leftCaptureSession.TextureConverter.FrameRenderTexture.width,
+                _leftCaptureSession.TextureConverter.FrameRenderTexture.height)
+            : Vector2Int.zero;
 
     private CameraInfo _leftCameraInfo;
     private CameraDevice _leftCameraDevice;
@@ -23,6 +41,25 @@ public class SimpleCameraPreview : MonoBehaviour
 
     protected void Start()
     {
+        // Deaktiviere UI-Elemente, wenn Preview nicht benötigt wird
+        if (!_enablePreviewDisplay)
+        {
+            if (_leftCameraPreview != null) _leftCameraPreview.gameObject.SetActive(false);
+            if (_rightCameraPreview != null) _rightCameraPreview.gameObject.SetActive(false);
+        }
+        else
+        {
+            // Prüfe, ob UI-Elemente zugewiesen sind, wenn Preview aktiviert ist
+            if (_leftCameraPreview == null)
+            {
+                Debug.LogWarning("Left camera preview RawImage is not assigned but preview display is enabled.");
+            }
+            if (_useBothCameras && _rightCameraPreview == null)
+            {
+                Debug.LogWarning("Right camera preview RawImage is not assigned but preview display is enabled.");
+            }
+        }
+
         // Check camera permission
         if (UnityEngine.Android.Permission.HasUserAuthorizedPermission(UCameraManager.HeadsetCameraPermission))
         {
@@ -84,7 +121,13 @@ public class SimpleCameraPreview : MonoBehaviour
             (_leftCameraDevice, _leftCaptureSession) = (null, null);
             return;
         }
-        _leftCameraPreview.texture = _leftCaptureSession.TextureConverter.FrameRenderTexture;
+        
+        // Nur die Textur zuweisen, wenn Preview aktiviert ist und UI-Element existiert
+        if (_enablePreviewDisplay && _leftCameraPreview != null)
+        {
+            _leftCameraPreview.texture = _leftCaptureSession.TextureConverter.FrameRenderTexture;
+        }
+        
         Debug.Log("Left capture session opened.");
 
         // Start right camera if enabled
@@ -111,7 +154,13 @@ public class SimpleCameraPreview : MonoBehaviour
                 (_rightCameraDevice, _rightCaptureSession) = (null, null);
                 return;
             }
-            _rightCameraPreview.texture = _rightCaptureSession.TextureConverter.FrameRenderTexture;
+            
+            // Nur die Textur zuweisen, wenn Preview aktiviert ist und UI-Element existiert
+            if (_enablePreviewDisplay && _rightCameraPreview != null)
+            {
+                _rightCameraPreview.texture = _rightCaptureSession.TextureConverter.FrameRenderTexture;
+            }
+            
             Debug.Log("Right capture session opened.");
         }
     }
