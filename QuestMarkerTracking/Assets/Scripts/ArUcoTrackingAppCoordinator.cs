@@ -218,14 +218,23 @@ namespace TryAR.MarkerTracking
         {
             try
             {
-                Mat rgbaMat = new Mat(renderTexture.height, renderTexture.width, CvType.CV_8UC4);
+                // Erstelle eine verkleinerte Version des Textur für die Verarbeitung
+                int processWidth = renderTexture.width / m_processingDivider;
+                int processHeight = renderTexture.height / m_processingDivider;
                 
-                RenderTexture.active = renderTexture;
-                Texture2D tempTex = new Texture2D(renderTexture.width, renderTexture.height, TextureFormat.RGBA32, false);
-                tempTex.ReadPixels(new UnityEngine.Rect(0, 0, renderTexture.width, renderTexture.height), 0, 0);
+                // Erstelle eine temporäre RenderTexture mit reduzierter Größe
+                RenderTexture scaledRT = RenderTexture.GetTemporary(processWidth, processHeight, 0, renderTexture.format);
+                Graphics.Blit(renderTexture, scaledRT);
+                
+                // Konvertiere die skalierte RenderTexture zu Mat
+                Mat rgbaMat = new Mat(processHeight, processWidth, CvType.CV_8UC4);
+                RenderTexture.active = scaledRT;
+                Texture2D tempTex = new Texture2D(processWidth, processHeight, TextureFormat.RGBA32, false);
+                tempTex.ReadPixels(new UnityEngine.Rect(0, 0, processWidth, processHeight), 0, 0);
                 tempTex.Apply();
                 Utils.texture2DToMat(tempTex, rgbaMat);
                 Destroy(tempTex);
+                RenderTexture.ReleaseTemporary(scaledRT);
 
                 // Konvertiere zu RGB und dann zu HSV
                 Imgproc.cvtColor(rgbaMat, m_rgbMat, Imgproc.COLOR_RGBA2RGB);
@@ -257,7 +266,7 @@ namespace TryAR.MarkerTracking
                 foreach (var contour in contours)
                 {
                     double area = Imgproc.contourArea(contour);
-                    if (area > 100) // Minimale Fläche für Rauschunterdrückung
+                    if (area > 100 / (m_processingDivider * m_processingDivider)) // Angepasste Mindestfläche
                     {
                         Point[] points = contour.toArray();
                         Point center = new Point();
@@ -296,26 +305,23 @@ namespace TryAR.MarkerTracking
                 {
                     if (m_ballVisualization != null)
                     {
-                        // WICHTIG: Hole die ORIGINALEN Kamera-Parameter, nicht die skalierten
+                        // Hole die originalen Kamera-Parameter
                         var cameraIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
-                        float fx = cameraIntrinsics.FocalLength.x;  // Originale Focal Length
-                        float fy = cameraIntrinsics.FocalLength.y;  // Originale Focal Length
-                        float cx = cameraIntrinsics.PrincipalPoint.x;  // Originaler Principal Point
-                        float cy = cameraIntrinsics.PrincipalPoint.y;  // Originaler Principal Point
-
-                        // Skaliere die gefundenen Koordinaten HOCH zur originalen Auflösung
-                        float scaledX = (float)maxCenter.x * m_processingDivider;
-                        float scaledY = (float)maxCenter.y * m_processingDivider;
-
-                        // Berechne normalisierte Koordinaten mit originalen Parametern
-                        float normalizedX = (float)((scaledX - cx) / fx);
-                        float normalizedY = (float)(-1 * (scaledY - cy) / fy);
-
-                        // Skaliere auch den Radius hoch
-                        float scaledRadius = (float)maxRadius * m_processingDivider;
-                        float apparentDiameter = scaledRadius * 2.0f;
-                        float distance = (fx * m_ballDiameterInMeters) / apparentDiameter;
-
+                        
+                        // Berechne die skalierten Kamera-Parameter für die verarbeitete Bildgröße
+                        float fx_scaled = cameraIntrinsics.FocalLength.x / m_processingDivider;
+                        float fy_scaled = cameraIntrinsics.FocalLength.y / m_processingDivider;
+                        float cx_scaled = cameraIntrinsics.PrincipalPoint.x / m_processingDivider;
+                        float cy_scaled = cameraIntrinsics.PrincipalPoint.y / m_processingDivider;
+                        
+                        // Berechne normalisierte Koordinaten mit den skalierten Parametern
+                        float normalizedX = (float)((maxCenter.x - cx_scaled) / fx_scaled);
+                        float normalizedY = (float)(-1 * (maxCenter.y - cy_scaled) / fy_scaled);
+                        
+                        // Berechne die Entfernung basierend auf dem bekannten Durchmesser
+                        float apparentDiameter = (float)maxRadius * 2.0f;
+                        float distance = (fx_scaled * m_ballDiameterInMeters) / apparentDiameter;
+                        
                         // WICHTIG: Diese Zeile ist der Schlüssel - hole die komplette Kamera-Pose
                         var cameraPose = PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye);
                         
@@ -357,7 +363,6 @@ namespace TryAR.MarkerTracking
                     contour.Dispose();
                 erodeElement.Dispose();
                 dilateElement.Dispose();
-
             }
             catch (System.Exception e)
             {

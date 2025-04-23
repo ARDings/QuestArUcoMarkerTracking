@@ -1659,7 +1659,7 @@ MonoBehaviour:
   m_ballOffset: {x: 0, y: 0, z: 0}
   m_showOffsetDebug: 0
   m_visualScaleFactor: 2
-  m_processingDivider: 1
+  m_processingDivider: 4
 --- !u!1 &340539805
 GameObject:
   m_ObjectHideFlags: 0
