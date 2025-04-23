@@ -111,7 +111,15 @@ public class SimpleCameraPreview : MonoBehaviour
         }
         Debug.Log("Left camera opened.");
 
-        _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(_leftCameraInfo.SupportedResolutions[^1]);
+        // Wähle eine niedrigere Auflösung (Teile durch 4)
+        var supportedResolutions = _leftCameraInfo.SupportedResolutions;
+        var selectedResolution = supportedResolutions.Length > 2 ? 
+                                supportedResolutions[supportedResolutions.Length - 3] : // Wähle eine niedrigere Auflösung
+                                supportedResolutions[0]; // Fallback zur niedrigsten Auflösung
+        
+        Debug.Log($"Selected camera resolution: {selectedResolution.width}x{selectedResolution.height}");
+
+        _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(selectedResolution);
         state = await _leftCaptureSession.CaptureSession.WaitForInitializationAsync();
         if (state != NativeWrapperState.Opened)
         {
@@ -144,7 +152,15 @@ public class SimpleCameraPreview : MonoBehaviour
             }
             Debug.Log("Right camera opened.");
 
-            _rightCaptureSession = _rightCameraDevice.CreateContinuousCaptureSession(_rightCameraInfo.SupportedResolutions[^1]);
+            // Verwende die gleiche niedrigere Auflösung wie für die linke Kamera
+            var rightSupportedResolutions = _rightCameraInfo.SupportedResolutions;
+            var rightSelectedResolution = rightSupportedResolutions.Length > 2 ? 
+                                        rightSupportedResolutions[rightSupportedResolutions.Length - 3] : 
+                                        rightSupportedResolutions[0];
+            
+            Debug.Log($"Selected right camera resolution: {rightSelectedResolution.width}x{rightSelectedResolution.height}");
+            
+            _rightCaptureSession = _rightCameraDevice.CreateContinuousCaptureSession(rightSelectedResolution);
             state = await _rightCaptureSession.CaptureSession.WaitForInitializationAsync();
             if (state != NativeWrapperState.Opened)
             {

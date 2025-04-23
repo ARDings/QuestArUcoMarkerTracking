@@ -91,7 +91,7 @@ namespace TryAR.MarkerTracking
         private bool m_isSettingOffset = false;
 
         [Header("Performance Settings")]
-        [SerializeField] private int m_processingDivider = 2;
+        [SerializeField] private int m_processingDivider = 1;
 
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
@@ -218,7 +218,8 @@ namespace TryAR.MarkerTracking
         {
             try
             {
-                // Erstelle eine verkleinerte Version des Textur für die Verarbeitung
+                // Da wir bereits eine niedrigere Auflösung haben, können wir den Divider reduzieren
+                // oder sogar auf 1 setzen für die Verarbeitung
                 int processWidth = renderTexture.width / m_processingDivider;
                 int processHeight = renderTexture.height / m_processingDivider;
                 
@@ -266,7 +267,7 @@ namespace TryAR.MarkerTracking
                 foreach (var contour in contours)
                 {
                     double area = Imgproc.contourArea(contour);
-                    if (area > 100 / (m_processingDivider * m_processingDivider)) // Angepasste Mindestfläche
+                    if (area > 25 / (m_processingDivider * m_processingDivider)) // Reduzierter Schwellwert
                     {
                         Point[] points = contour.toArray();
                         Point center = new Point();
@@ -309,10 +310,12 @@ namespace TryAR.MarkerTracking
                         var cameraIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
                         
                         // Berechne die skalierten Kamera-Parameter für die verarbeitete Bildgröße
-                        float fx_scaled = cameraIntrinsics.FocalLength.x / m_processingDivider;
-                        float fy_scaled = cameraIntrinsics.FocalLength.y / m_processingDivider;
-                        float cx_scaled = cameraIntrinsics.PrincipalPoint.x / m_processingDivider;
-                        float cy_scaled = cameraIntrinsics.PrincipalPoint.y / m_processingDivider;
+                        // Hier müssen wir die tatsächliche Auflösung berücksichtigen
+                        float originalToProcessedRatio = (float)cameraIntrinsics.Resolution.x / renderTexture.width;
+                        float fx_scaled = cameraIntrinsics.FocalLength.x / originalToProcessedRatio / m_processingDivider;
+                        float fy_scaled = cameraIntrinsics.FocalLength.y / originalToProcessedRatio / m_processingDivider;
+                        float cx_scaled = cameraIntrinsics.PrincipalPoint.x / originalToProcessedRatio / m_processingDivider;
+                        float cy_scaled = cameraIntrinsics.PrincipalPoint.y / originalToProcessedRatio / m_processingDivider;
                         
                         // Berechne normalisierte Koordinaten mit den skalierten Parametern
                         float normalizedX = (float)((maxCenter.x - cx_scaled) / fx_scaled);
@@ -347,7 +350,7 @@ namespace TryAR.MarkerTracking
                         
                         // Position smoothen
                         Vector3 currentPos = m_ballVisualization.transform.position;
-                        float smoothFactor = 0.5f;
+                        float smoothFactor = 0.7f; // Erhöht von 0.5f auf 0.7f für mehr Glättung
                         Vector3 finalPosition = Vector3.Lerp(currentPos, worldPosition, 1 - smoothFactor);
                         
                         // Anwenden
