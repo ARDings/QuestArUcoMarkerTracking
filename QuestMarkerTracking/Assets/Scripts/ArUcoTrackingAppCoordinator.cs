@@ -14,6 +14,7 @@ using OpenCVForUnity.UnityUtils;
 using TryAR.ColorTracking;  // Für die ColorObject Klasse
 using System.Threading;
 using System.Collections.Concurrent;
+using OpenCVForUnity.Calib3dModule;
 
 namespace TryAR.MarkerTracking
 {
@@ -212,6 +213,48 @@ namespace TryAR.MarkerTracking
         {
             var nativeIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
             
+            // Debug-Ausgabe aller verfügbaren Kamera-Eigenschaften
+            Debug.Log($"[Camera Debug] Camera Eye: {CameraEye}");
+            Debug.Log($"[Camera Debug] Resolution: {nativeIntrinsics.Resolution}");
+            Debug.Log($"[Camera Debug] Principal Point: {nativeIntrinsics.PrincipalPoint}");
+            Debug.Log($"[Camera Debug] Focal Length: {nativeIntrinsics.FocalLength}");
+            
+            // Versuche alle öffentlichen Properties der Intrinsics auszulesen
+            var type = nativeIntrinsics.GetType();
+            var properties = type.GetProperties();
+            Debug.Log("[Camera Debug] All available properties:");
+            foreach (var prop in properties)
+            {
+                try
+                {
+                    var value = prop.GetValue(nativeIntrinsics);
+                    Debug.Log($"[Camera Debug] {prop.Name}: {value}");
+                }
+                catch (System.Exception e)
+                {
+                    Debug.Log($"[Camera Debug] Could not read {prop.Name}: {e.Message}");
+                }
+            }
+            
+            // Versuche auch private Felder zu lesen
+            var fields = type.GetFields(System.Reflection.BindingFlags.NonPublic | 
+                                       System.Reflection.BindingFlags.Instance | 
+                                       System.Reflection.BindingFlags.Public);
+            Debug.Log("[Camera Debug] All available fields:");
+            foreach (var field in fields)
+            {
+                try
+                {
+                    var value = field.GetValue(nativeIntrinsics);
+                    Debug.Log($"[Camera Debug] {field.Name}: {value}");
+                }
+                catch (System.Exception e)
+                {
+                    Debug.Log($"[Camera Debug] Could not read {field.Name}: {e.Message}");
+                }
+            }
+
+            // Rest des ursprünglichen Codes...
             var cx = nativeIntrinsics.PrincipalPoint.x / m_processingDivider;
             var cy = nativeIntrinsics.PrincipalPoint.y / m_processingDivider;
             var fx = nativeIntrinsics.FocalLength.x / m_processingDivider;
@@ -296,7 +339,7 @@ namespace TryAR.MarkerTracking
                         
                         // Smooth position
                         Vector3 currentPos = m_ballVisualization.transform.position;
-                        float smoothFactor = 0.7f;
+                        float smoothFactor = 0.2f;
                         finalPosition = Vector3.Lerp(currentPos, finalPosition, 1 - smoothFactor);
                         
                         // Apply position and scale
@@ -531,8 +574,35 @@ namespace TryAR.MarkerTracking
                                     float cx_scaled = frameData.CameraIntrinsics.PrincipalPoint.x / originalToProcessedRatio / m_processingDivider;
                                     float cy_scaled = frameData.CameraIntrinsics.PrincipalPoint.y / originalToProcessedRatio / m_processingDivider;
 
-                                    float normalizedX = (float)((maxCenter.x - cx_scaled) / fx_scaled);
-                                    float normalizedY = (float)((maxCenter.y - cy_scaled) / fy_scaled);
+                                    // Korrigiere Verzerrung
+                                    MatOfPoint2f distortedPoint = new MatOfPoint2f();
+                                    Point p = new Point(maxCenter.x, maxCenter.y);
+                                    distortedPoint.fromArray(new Point[] { p });
+                                    MatOfPoint2f undistortedPoint = new MatOfPoint2f();
+
+                                    // Erstelle Kameramatrix
+                                    Mat cameraMatrix = new Mat(3, 3, CvType.CV_64FC1);
+                                    cameraMatrix.put(0, 0, new double[] {
+                                        fx_scaled, 0, cx_scaled,
+                                        0, fy_scaled, cy_scaled,
+                                        0, 0, 1
+                                    });
+
+                                    // Erstelle Verzerrungskoeffizienten für Quest Pro
+                                    // Basierend auf der Brennweite und dem FOV der Kamera
+                                    // k1, k2, p1, p2, k3
+                                    MatOfDouble distCoeffs = new MatOfDouble(0.15, -0.035, 0.0, 0.0, 0.008);
+
+                                    // Entzerrung des Punktes
+                                    Calib3d.undistortPoints(distortedPoint, undistortedPoint, cameraMatrix, distCoeffs);
+
+                                    // Hole entzerrte Koordinaten
+                                    Point[] undistortedPoints = undistortedPoint.toArray();
+                                    Point undistorted = undistortedPoints[0];
+
+                                    // Berechne normalisierte Koordinaten mit entzerrtem Punkt
+                                    float normalizedX = (float)((undistorted.x * fx_scaled + cx_scaled - cx_scaled) / fx_scaled);
+                                    float normalizedY = (float)((undistorted.y * fy_scaled + cy_scaled - cy_scaled) / fy_scaled);
                                     
                                     float apparentDiameter = (float)maxRadius * 2.0f;
                                     float distance = (fx_scaled * m_ballDiameterInMeters) / apparentDiameter;
@@ -546,6 +616,12 @@ namespace TryAR.MarkerTracking
                                     result.BallFound = true;
                                     result.WorldPosition = frameData.CameraToWorldMatrix.MultiplyPoint3x4(pointInCameraSpace);
                                     result.Diameter = apparentDiameter;
+
+                                    // Cleanup
+                                    distortedPoint.Dispose();
+                                    undistortedPoint.Dispose();
+                                    cameraMatrix.Dispose();
+                                    distCoeffs.Dispose();
                                 }
 
                                 // Cleanup

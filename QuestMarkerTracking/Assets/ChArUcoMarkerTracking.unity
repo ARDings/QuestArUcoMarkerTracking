@@ -1650,7 +1650,7 @@ MonoBehaviour:
   m_enableMarkerTracking: 0
   m_enableColorTracking: 1
   m_showColorDebugView: 0
-  m_ballDiameterInMeters: 0.2
+  m_ballDiameterInMeters: 0.3
   m_ballVisualization: {fileID: 436612660}
   m_pinkHSVMin: {x: 140, y: 50, z: 150}
   m_pinkHSVMax: {x: 175, y: 255, z: 255}
@@ -1658,7 +1658,7 @@ MonoBehaviour:
   m_showHSVDebug: 0
   m_ballOffset: {x: 0, y: 0, z: 0}
   m_showOffsetDebug: 0
-  m_visualScaleFactor: 2
+  m_visualScaleFactor: 1
   m_processingDivider: 1
 --- !u!1 &340539805
 GameObject:
