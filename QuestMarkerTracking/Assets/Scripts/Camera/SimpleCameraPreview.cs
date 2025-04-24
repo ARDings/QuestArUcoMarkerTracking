@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.UI;
+using UnityEngine.Rendering;  // Für GraphicsDeviceType
 using Uralstech.UXR.QuestCamera;
 
 public class SimpleCameraPreview : MonoBehaviour
@@ -16,28 +17,34 @@ public class SimpleCameraPreview : MonoBehaviour
     [Tooltip("Preview to show the right camera feed (only used if useBothCameras is true)")]
     [SerializeField] private RawImage _rightCameraPreview;
 
-    // Füge öffentliche Eigenschaften hinzu, um Zugriff auf die Texturen zu ermöglichen
-    public RenderTexture LeftCameraTexture => _leftCaptureSession?.TextureConverter?.FrameRenderTexture;
-    public RenderTexture RightCameraTexture => _rightCaptureSession?.TextureConverter?.FrameRenderTexture;
+    // Texture Properties anpassen
+    public Texture2D LeftCameraTexture => _leftCaptureSession?.Texture;
+    public Texture2D RightCameraTexture => _rightCaptureSession?.Texture;
     
-    // Füge eine Eigenschaft hinzu, um zu prüfen ob die Kameras bereit sind
-    public bool AreCamerasReady => _leftCaptureSession?.TextureConverter?.FrameRenderTexture != null;
+    public bool AreCamerasReady => _leftCaptureSession?.Texture != null;
 
-    // Füge Resolution-Property hinzu
     public Vector2Int Resolution => 
-        _leftCaptureSession?.TextureConverter?.FrameRenderTexture != null 
+        _leftCaptureSession?.Texture != null 
             ? new Vector2Int(
-                _leftCaptureSession.TextureConverter.FrameRenderTexture.width,
-                _leftCaptureSession.TextureConverter.FrameRenderTexture.height)
+                _leftCaptureSession.Texture.width,
+                _leftCaptureSession.Texture.height)
             : Vector2Int.zero;
 
     private CameraInfo _leftCameraInfo;
     private CameraDevice _leftCameraDevice;
-    private CaptureSessionObject<ContinuousCaptureSession> _leftCaptureSession;
+    private SurfaceTextureCaptureSession _leftCaptureSession;
 
     private CameraInfo _rightCameraInfo;
     private CameraDevice _rightCameraDevice;
-    private CaptureSessionObject<ContinuousCaptureSession> _rightCaptureSession;
+    private SurfaceTextureCaptureSession _rightCaptureSession;
+
+    // RenderTexture für ArUcoTrackingAppCoordinator
+    private RenderTexture _leftRenderTexture;
+    private RenderTexture _rightRenderTexture;
+
+    // Public Properties für RenderTextures
+    public RenderTexture LeftRenderTexture => _leftRenderTexture;
+    public RenderTexture RightRenderTexture => _rightRenderTexture;
 
     private float _lastLogTime = 0;
     private int _frameCount = 0;
@@ -96,7 +103,15 @@ public class SimpleCameraPreview : MonoBehaviour
 
     private async void StartCameras()
     {
-        // Start left camera
+        // Check Graphics API
+        if (SystemInfo.graphicsDeviceType != GraphicsDeviceType.OpenGLES3)
+        {
+            Debug.LogError("SurfaceTextureCaptureSession requires OpenGL ES 3.0 or higher!");
+            enabled = false;
+            return;
+        }
+
+        // Linke Kamera Setup
         if (_leftCameraInfo == null)
         {
             Debug.LogError("No left camera info available");
@@ -114,54 +129,40 @@ public class SimpleCameraPreview : MonoBehaviour
         }
         Debug.Log("Left camera opened.");
 
-        // Wähle eine niedrigere Auflösung (Teile durch 4)
         var supportedResolutions = _leftCameraInfo.SupportedResolutions;
-        
-        // Log alle verfügbaren Auflösungen
-        Debug.Log("Camera2: Available resolutions:");
-        for (int i = 0; i < supportedResolutions.Length; i++)
-        {
-            Debug.Log($"Camera2: Resolution {i}: {supportedResolutions[i].width}x{supportedResolutions[i].height}");
-        }
-        
         var selectedResolution = supportedResolutions.Length > 2 ? 
-                                supportedResolutions[supportedResolutions.Length - 3] : // Wähle eine niedrigere Auflösung
-                                supportedResolutions[0]; // Fallback zur niedrigsten Auflösung
+                                supportedResolutions[supportedResolutions.Length - 3] : 
+                                supportedResolutions[0];
         
         Debug.Log($"Camera2: Selected camera resolution: {selectedResolution.width}x{selectedResolution.height}");
 
-        // Erstelle die Capture-Session mit YUV-Format für niedrigere Latenz
-        _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(selectedResolution);
+        // SurfaceTextureCaptureSession erstellen
+        var captureSessionObject = _leftCameraDevice.CreateSurfaceTextureCaptureSession(selectedResolution);
+        _leftCaptureSession = captureSessionObject as SurfaceTextureCaptureSession;
         
-        // Hier könnten wir das Format auf YUV setzen, falls die API das unterstützt
-        // _leftCaptureSession.CaptureSession.SetPreferredFormat(PreferredFormat.YUV);
-        
-        state = await _leftCaptureSession.CaptureSession.WaitForInitializationAsync();
+        state = await _leftCaptureSession.WaitForInitializationAsync();
         if (state != NativeWrapperState.Opened)
         {
             Debug.LogError("Failed to open left capture session.");
-            _leftCaptureSession.Destroy();
+            _leftCaptureSession.Release();
             _leftCameraDevice.Destroy();
             (_leftCameraDevice, _leftCaptureSession) = (null, null);
             return;
         }
-        
-        // Log die tatsächliche Auflösung der RenderTexture
-        if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
-        {
-            Debug.Log($"Camera2: Actual texture resolution: {_leftCaptureSession.TextureConverter.FrameRenderTexture.width}x{_leftCaptureSession.TextureConverter.FrameRenderTexture.height}");
-            Debug.Log($"Camera2: Texture format: {_leftCaptureSession.TextureConverter.FrameRenderTexture.format}");
-        }
-        
-        // Nur die Textur zuweisen, wenn Preview aktiviert ist und UI-Element existiert
+
+        // RenderTexture für ArUco erstellen
+        _leftRenderTexture = new RenderTexture(selectedResolution.width, selectedResolution.height, 0);
+        _leftRenderTexture.Create();
+
+        // Preview Setup
         if (_enablePreviewDisplay && _leftCameraPreview != null)
         {
-            _leftCameraPreview.texture = _leftCaptureSession.TextureConverter.FrameRenderTexture;
+            _leftCameraPreview.texture = _leftRenderTexture;
         }
         
         Debug.Log("Left capture session opened.");
 
-        // Start right camera if enabled
+        // Rechte Kamera (falls aktiviert)
         if (_useBothCameras && _rightCameraInfo != null)
         {
             _rightCameraDevice = UCameraManager.Instance.OpenCamera(_rightCameraInfo);
@@ -173,31 +174,27 @@ public class SimpleCameraPreview : MonoBehaviour
                 _rightCameraDevice = null;
                 return;
             }
-            Debug.Log("Right camera opened.");
-
-            // Verwende die gleiche niedrigere Auflösung wie für die linke Kamera
-            var rightSupportedResolutions = _rightCameraInfo.SupportedResolutions;
-            var rightSelectedResolution = rightSupportedResolutions.Length > 2 ? 
-                                        rightSupportedResolutions[rightSupportedResolutions.Length - 3] : 
-                                        rightSupportedResolutions[0];
             
-            Debug.Log($"Selected right camera resolution: {rightSelectedResolution.width}x{rightSelectedResolution.height}");
+            var rightCaptureSessionObject = _rightCameraDevice.CreateSurfaceTextureCaptureSession(selectedResolution);
+            _rightCaptureSession = rightCaptureSessionObject as SurfaceTextureCaptureSession;
             
-            _rightCaptureSession = _rightCameraDevice.CreateContinuousCaptureSession(rightSelectedResolution);
-            state = await _rightCaptureSession.CaptureSession.WaitForInitializationAsync();
+            state = await _rightCaptureSession.WaitForInitializationAsync();
             if (state != NativeWrapperState.Opened)
             {
                 Debug.LogError("Failed to open right capture session.");
-                _rightCaptureSession.Destroy();
+                _rightCaptureSession.Release();
                 _rightCameraDevice.Destroy();
                 (_rightCameraDevice, _rightCaptureSession) = (null, null);
                 return;
             }
-            
-            // Nur die Textur zuweisen, wenn Preview aktiviert ist und UI-Element existiert
+
+            // RenderTexture für rechte Kamera
+            _rightRenderTexture = new RenderTexture(selectedResolution.width, selectedResolution.height, 0);
+            _rightRenderTexture.Create();
+
             if (_enablePreviewDisplay && _rightCameraPreview != null)
             {
-                _rightCameraPreview.texture = _rightCaptureSession.TextureConverter.FrameRenderTexture;
+                _rightCameraPreview.texture = _rightRenderTexture;
             }
             
             Debug.Log("Right capture session opened.");
@@ -206,10 +203,21 @@ public class SimpleCameraPreview : MonoBehaviour
 
     protected void OnDestroy()
     {
+        if (_leftRenderTexture != null)
+        {
+            _leftRenderTexture.Release();
+            Destroy(_leftRenderTexture);
+        }
+        if (_rightRenderTexture != null)
+        {
+            _rightRenderTexture.Release();
+            Destroy(_rightRenderTexture);
+        }
+
         // Cleanup left camera
         if (_leftCaptureSession != null)
         {
-            _leftCaptureSession.Destroy();
+            _leftCaptureSession.Release();
             _leftCaptureSession = null;
         }
         if (_leftCameraDevice != null)
@@ -221,7 +229,7 @@ public class SimpleCameraPreview : MonoBehaviour
         // Cleanup right camera
         if (_rightCaptureSession != null)
         {
-            _rightCaptureSession.Destroy();
+            _rightCaptureSession.Release();
             _rightCaptureSession = null;
         }
         if (_rightCameraDevice != null)
@@ -234,6 +242,16 @@ public class SimpleCameraPreview : MonoBehaviour
     private void Update()
     {
         if (!AreCamerasReady) return;
+
+        // Texture2D in RenderTexture kopieren
+        if (_leftCaptureSession?.Texture != null)
+        {
+            Graphics.Blit(_leftCaptureSession.Texture, _leftRenderTexture);
+        }
+        if (_rightCaptureSession?.Texture != null && _rightRenderTexture != null)
+        {
+            Graphics.Blit(_rightCaptureSession.Texture, _rightRenderTexture);
+        }
         
         _frameCount++;
         
@@ -243,10 +261,9 @@ public class SimpleCameraPreview : MonoBehaviour
             float fps = _frameCount / (Time.time - _lastLogTime);
             Debug.Log($"Camera2: Current FPS: {fps:F1}");
             
-            // Log aktuelle Auflösung erneut zur Überprüfung
-            if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
+            if (_leftCaptureSession?.Texture != null)
             {
-                Debug.Log($"Camera2: Current texture resolution: {_leftCaptureSession.TextureConverter.FrameRenderTexture.width}x{_leftCaptureSession.TextureConverter.FrameRenderTexture.height}");
+                Debug.Log($"Camera2: Current texture resolution: {_leftCaptureSession.Texture.width}x{_leftCaptureSession.Texture.height}");
             }
             
             _frameCount = 0;

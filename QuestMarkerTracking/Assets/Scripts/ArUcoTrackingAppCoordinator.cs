@@ -166,7 +166,7 @@ namespace TryAR.MarkerTracking
 
             if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
             {
-                m_arucoMarkerTracking.DetectMarker(m_cameraPreview.LeftCameraTexture);
+                m_arucoMarkerTracking.DetectMarker(m_cameraPreview.LeftRenderTexture);
                 
                 if (m_markerGameObjectDictionary.Count > 0)
                 {
@@ -179,7 +179,7 @@ namespace TryAR.MarkerTracking
 
             if (m_enableColorTracking)
             {
-                ProcessBallTracking(m_cameraPreview.LeftCameraTexture);
+                ProcessBallTracking(m_cameraPreview.LeftRenderTexture);
             }
 
             UpdateHSVControls();
