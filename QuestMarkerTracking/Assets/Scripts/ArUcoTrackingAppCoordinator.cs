@@ -12,6 +12,8 @@ using OpenCVForUnity.CoreModule;
 using OpenCVForUnity.ImgprocModule;
 using OpenCVForUnity.UnityUtils;
 using TryAR.ColorTracking;  // Für die ColorObject Klasse
+using System.Threading;
+using System.Collections.Concurrent;
 
 namespace TryAR.MarkerTracking
 {
@@ -93,6 +95,30 @@ namespace TryAR.MarkerTracking
         [Header("Performance Settings")]
         [SerializeField] private int m_processingDivider = 1;
 
+        // Neue Felder für Threading
+        private Thread m_processingThread;
+        private ConcurrentQueue<RenderTextureData> m_frameQueue;
+        private ConcurrentQueue<BallDetectionResult> m_resultQueue;
+        private volatile bool m_isProcessing;
+        private object m_matLock = new object();
+
+        // Strukturen für Thread-sichere Datenübergabe
+        private struct RenderTextureData
+        {
+            public byte[] TextureBytes;
+            public int Width;
+            public int Height;
+            public Matrix4x4 CameraToWorldMatrix;
+            public PassthroughCameraIntrinsics CameraIntrinsics;
+        }
+
+        private struct BallDetectionResult
+        {
+            public bool BallFound;
+            public Vector3 WorldPosition;
+            public float Diameter;
+        }
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -117,6 +143,15 @@ namespace TryAR.MarkerTracking
             m_pinkBall = new ColorObject("pink");
             UpdatePinkHSVValues();
             InitializeBallTracking();
+
+            // Initialize threading components
+            m_frameQueue = new ConcurrentQueue<RenderTextureData>();
+            m_resultQueue = new ConcurrentQueue<BallDetectionResult>();
+            m_isProcessing = true;
+            
+            // Start processing thread
+            m_processingThread = new Thread(ProcessingThreadFunction);
+            m_processingThread.Start();
         }
 
         /// <summary>
@@ -218,167 +253,57 @@ namespace TryAR.MarkerTracking
         {
             try
             {
-                // Log der Eingabeauflösung
-                Debug.Log($"Camera2: Processing texture: {renderTexture.width}x{renderTexture.height}");
-                
-                // Da wir bereits eine niedrigere Auflösung haben, können wir den Divider auf 1 setzen
-                // für bessere Genauigkeit oder auf 2 für bessere Performance
-                int processWidth = renderTexture.width / m_processingDivider;
-                int processHeight = renderTexture.height / m_processingDivider;
-                
-                Debug.Log($"Camera2: Processing at resolution: {processWidth}x{processHeight}");
-                
-                // Erstelle eine temporäre RenderTexture mit reduzierter Größe
-                RenderTexture scaledRT = RenderTexture.GetTemporary(processWidth, processHeight, 0, renderTexture.format);
+                if (renderTexture == null) return;
+
+                // Prepare data for processing thread
+                var textureData = new RenderTextureData
+                {
+                    Width = renderTexture.width / m_processingDivider,
+                    Height = renderTexture.height / m_processingDivider,
+                    CameraIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye),
+                    CameraToWorldMatrix = Matrix4x4.TRS(
+                        PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye).position,
+                        PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye).rotation,
+                        Vector3.one
+                    )
+                };
+
+                // Convert RenderTexture to byte array
+                RenderTexture scaledRT = RenderTexture.GetTemporary(textureData.Width, textureData.Height, 0, renderTexture.format);
                 Graphics.Blit(renderTexture, scaledRT);
                 
-                // Konvertiere die skalierte RenderTexture zu Mat
-                Mat rgbaMat = new Mat(processHeight, processWidth, CvType.CV_8UC4);
+                Texture2D tempTex = new Texture2D(textureData.Width, textureData.Height, TextureFormat.RGBA32, false);
                 RenderTexture.active = scaledRT;
-                Texture2D tempTex = new Texture2D(processWidth, processHeight, TextureFormat.RGBA32, false);
-                tempTex.ReadPixels(new UnityEngine.Rect(0, 0, processWidth, processHeight), 0, 0);
+                tempTex.ReadPixels(new UnityEngine.Rect(0, 0, textureData.Width, textureData.Height), 0, 0);
                 tempTex.Apply();
-                Utils.texture2DToMat(tempTex, rgbaMat);
-                Destroy(tempTex);
-                RenderTexture.ReleaseTemporary(scaledRT);
-
-                // Konvertiere zu RGB und dann zu HSV
-                Imgproc.cvtColor(rgbaMat, m_rgbMat, Imgproc.COLOR_RGBA2RGB);
-                Imgproc.cvtColor(m_rgbMat, m_hsvMat, Imgproc.COLOR_RGB2HSV);
-
-                // Finde pinke Objekte
-                Core.inRange(m_hsvMat, m_pinkBall.getHSVmin(), m_pinkBall.getHSVmax(), m_thresholdMat);
-
-                // Morphologische Operationen
-                Mat erodeElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(3, 3));
-                Mat dilateElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(8, 8));
                 
-                Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
-                Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
-                Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
-                Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
+                textureData.TextureBytes = tempTex.GetRawTextureData();
+                
+                // Cleanup
+                RenderTexture.ReleaseTemporary(scaledRT);
+                Destroy(tempTex);
 
-                // Verwende eine effizientere Kontursuche
-                List<MatOfPoint> contours = new List<MatOfPoint>();
-                Mat hierarchy = new Mat();
-                Imgproc.findContours(m_thresholdMat, contours, hierarchy, 
-                    Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+                // Enqueue data for processing
+                m_frameQueue.Enqueue(textureData);
 
-                // Früher Abbruch, wenn keine Konturen gefunden wurden
-                if (contours.Count == 0) {
-                    // Aufräumen
-                    rgbaMat.Dispose();
-                    hierarchy.Dispose();
-                    return;
-                }
-
-                double maxArea = 0;
-                Point maxCenter = new Point();
-                double maxRadius = 0;
-
-                // Finde den größten kreisförmigen Blob
-                foreach (var contour in contours)
-                {
-                    double area = Imgproc.contourArea(contour);
-                    if (area > 25 / (m_processingDivider * m_processingDivider)) // Reduzierter Schwellwert
-                    {
-                        Point[] points = contour.toArray();
-                        Point center = new Point();
-                        
-                        // Berechne den Mittelpunkt als Durchschnitt aller Konturpunkte
-                        foreach (Point p in points)
-                        {
-                            center.x += p.x;
-                            center.y += p.y;
-                        }
-                        center.x /= points.Length;
-                        center.y /= points.Length;
-                        
-                        // Berechne den Radius als maximalen Abstand vom Mittelpunkt
-                        double currentRadius = 0;
-                        foreach (Point p in points)
-                        {
-                            double dx = p.x - center.x;
-                            double dy = p.y - center.y;
-                            double distance = Math.Sqrt(dx * dx + dy * dy);
-                            currentRadius = Math.Max(currentRadius, distance);
-                        }
-
-                        // Wenn dies der bisher größte gefundene Kreis ist
-                        if (area > maxArea)
-                        {
-                            maxArea = area;
-                            maxCenter = center;
-                            maxRadius = currentRadius;
-                        }
-                    }
-                }
-
-                // Wenn ein Ball gefunden wurde
-                if (maxArea > 0)
+                // Check for results
+                if (m_resultQueue.TryDequeue(out BallDetectionResult result) && result.BallFound)
                 {
                     if (m_ballVisualization != null)
                     {
-                        // Hole die originalen Kamera-Parameter
-                        var cameraIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
+                        // Apply offset
+                        Vector3 finalPosition = result.WorldPosition + m_ballOffset;
                         
-                        // Berechne die skalierten Kamera-Parameter für die verarbeitete Bildgröße
-                        // Hier müssen wir die tatsächliche Auflösung berücksichtigen
-                        float originalToProcessedRatio = (float)cameraIntrinsics.Resolution.x / renderTexture.width;
-                        float fx_scaled = cameraIntrinsics.FocalLength.x / originalToProcessedRatio / m_processingDivider;
-                        float fy_scaled = cameraIntrinsics.FocalLength.y / originalToProcessedRatio / m_processingDivider;
-                        float cx_scaled = cameraIntrinsics.PrincipalPoint.x / originalToProcessedRatio / m_processingDivider;
-                        float cy_scaled = cameraIntrinsics.PrincipalPoint.y / originalToProcessedRatio / m_processingDivider;
-                        
-                        // Berechne normalisierte Koordinaten mit den skalierten Parametern
-                        float normalizedX = (float)((maxCenter.x - cx_scaled) / fx_scaled);
-                        float normalizedY = (float)(-1 * (maxCenter.y - cy_scaled) / fy_scaled);
-                        
-                        // Berechne die Entfernung basierend auf dem bekannten Durchmesser
-                        float apparentDiameter = (float)maxRadius * 2.0f;
-                        float distance = (fx_scaled * m_ballDiameterInMeters) / apparentDiameter;
-                        
-                        // WICHTIG: Diese Zeile ist der Schlüssel - hole die komplette Kamera-Pose
-                        var cameraPose = PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye);
-                        
-                        // Vektor im lokalen Kamera-Koordinatensystem
-                        Vector3 pointInCameraSpace = new Vector3(
-                            normalizedX * distance,
-                            normalizedY * distance,
-                            distance
-                        );
-                        
-                        // Matrix für Kamera-zu-Welt Transformation erstellen
-                        Matrix4x4 cameraToWorldMatrix = Matrix4x4.TRS(
-                            cameraPose.position,
-                            cameraPose.rotation,
-                            Vector3.one
-                        );
-                        
-                        // Transformiere Punkt mit der Matrix
-                        Vector3 worldPosition = cameraToWorldMatrix.MultiplyPoint3x4(pointInCameraSpace);
-                        
-                        // Offset anwenden
-                        worldPosition += m_ballOffset;
-                        
-                        // Position smoothen
+                        // Smooth position
                         Vector3 currentPos = m_ballVisualization.transform.position;
-                        float smoothFactor = 0.7f; // Erhöht von 0.5f auf 0.7f für mehr Glättung
-                        Vector3 finalPosition = Vector3.Lerp(currentPos, worldPosition, 1 - smoothFactor);
+                        float smoothFactor = 0.7f;
+                        finalPosition = Vector3.Lerp(currentPos, finalPosition, 1 - smoothFactor);
                         
-                        // Anwenden
+                        // Apply position and scale
                         m_ballVisualization.transform.position = finalPosition;
                         m_ballVisualization.transform.localScale = Vector3.one * m_ballDiameterInMeters * m_visualScaleFactor;
                     }
                 }
-
-                // Aufräumen
-                rgbaMat.Dispose();
-                hierarchy.Dispose();
-                foreach (var contour in contours)
-                    contour.Dispose();
-                erodeElement.Dispose();
-                dilateElement.Dispose();
             }
             catch (System.Exception e)
             {
@@ -516,8 +441,141 @@ namespace TryAR.MarkerTracking
             }
         }
 
+        private void ProcessingThreadFunction()
+        {
+            while (m_isProcessing)
+            {
+                if (m_frameQueue.TryDequeue(out RenderTextureData frameData))
+                {
+                    try
+                    {
+                        lock (m_matLock)
+                        {
+                            // Convert byte array to Mat
+                            Mat rgbaMat = new Mat(frameData.Height, frameData.Width, CvType.CV_8UC4);
+                            rgbaMat.put(0, 0, frameData.TextureBytes);
+
+                            // Convert to RGB and then to HSV
+                            Imgproc.cvtColor(rgbaMat, m_rgbMat, Imgproc.COLOR_RGBA2RGB);
+                            Imgproc.cvtColor(m_rgbMat, m_hsvMat, Imgproc.COLOR_RGB2HSV);
+
+                            // Find pink objects
+                            Core.inRange(m_hsvMat, m_pinkBall.getHSVmin(), m_pinkBall.getHSVmax(), m_thresholdMat);
+
+                            // Morphological operations
+                            Mat erodeElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(3, 3));
+                            Mat dilateElement = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, new Size(8, 8));
+                            
+                            Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
+                            Imgproc.erode(m_thresholdMat, m_thresholdMat, erodeElement);
+                            Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
+                            Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
+
+                            // Find contours
+                            List<MatOfPoint> contours = new List<MatOfPoint>();
+                            Mat hierarchy = new Mat();
+                            Imgproc.findContours(m_thresholdMat, contours, hierarchy, 
+                                Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+
+                            // Process results
+                            BallDetectionResult result = new BallDetectionResult { BallFound = false };
+
+                            if (contours.Count > 0)
+                            {
+                                // Find largest blob
+                                double maxArea = 0;
+                                Point maxCenter = new Point();
+                                double maxRadius = 0;
+
+                                foreach (var contour in contours)
+                                {
+                                    double area = Imgproc.contourArea(contour);
+                                    if (area > 25 / (m_processingDivider * m_processingDivider))
+                                    {
+                                        Point[] points = contour.toArray();
+                                        Point center = new Point();
+                                        
+                                        foreach (Point p in points)
+                                        {
+                                            center.x += p.x;
+                                            center.y += p.y;
+                                        }
+                                        center.x /= points.Length;
+                                        center.y /= points.Length;
+                                        
+                                        double currentRadius = 0;
+                                        foreach (Point p in points)
+                                        {
+                                            double dx = p.x - center.x;
+                                            double dy = p.y - center.y;
+                                            double distance = Math.Sqrt(dx * dx + dy * dy);
+                                            currentRadius = Math.Max(currentRadius, distance);
+                                        }
+
+                                        if (area > maxArea)
+                                        {
+                                            maxArea = area;
+                                            maxCenter = center;
+                                            maxRadius = currentRadius;
+                                        }
+                                    }
+                                    contour.Dispose();
+                                }
+
+                                if (maxArea > 0)
+                                {
+                                    // Calculate 3D position
+                                    float originalToProcessedRatio = (float)frameData.CameraIntrinsics.Resolution.x / frameData.Width;
+                                    float fx_scaled = frameData.CameraIntrinsics.FocalLength.x / originalToProcessedRatio / m_processingDivider;
+                                    float fy_scaled = frameData.CameraIntrinsics.FocalLength.y / originalToProcessedRatio / m_processingDivider;
+                                    float cx_scaled = frameData.CameraIntrinsics.PrincipalPoint.x / originalToProcessedRatio / m_processingDivider;
+                                    float cy_scaled = frameData.CameraIntrinsics.PrincipalPoint.y / originalToProcessedRatio / m_processingDivider;
+
+                                    float normalizedX = (float)((maxCenter.x - cx_scaled) / fx_scaled);
+                                    float normalizedY = (float)((maxCenter.y - cy_scaled) / fy_scaled);
+                                    
+                                    float apparentDiameter = (float)maxRadius * 2.0f;
+                                    float distance = (fx_scaled * m_ballDiameterInMeters) / apparentDiameter;
+
+                                    Vector3 pointInCameraSpace = new Vector3(
+                                        normalizedX * distance,
+                                        normalizedY * distance,
+                                        distance
+                                    );
+
+                                    result.BallFound = true;
+                                    result.WorldPosition = frameData.CameraToWorldMatrix.MultiplyPoint3x4(pointInCameraSpace);
+                                    result.Diameter = apparentDiameter;
+                                }
+
+                                // Cleanup
+                                hierarchy.Dispose();
+                                erodeElement.Dispose();
+                                dilateElement.Dispose();
+                                rgbaMat.Dispose();
+                            }
+
+                            m_resultQueue.Enqueue(result);
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogError($"Processing thread error: {e.Message}\n{e.StackTrace}");
+                    }
+                }
+                else
+                {
+                    Thread.Sleep(1); // Prevent tight loop
+                }
+            }
+        }
+
         private void OnDestroy()
         {
+            // Stop processing thread
+            m_isProcessing = false;
+            m_processingThread?.Join();
+            
             if (m_rgbMat != null) m_rgbMat.Dispose();
             if (m_hsvMat != null) m_hsvMat.Dispose();
             if (m_thresholdMat != null) m_thresholdMat.Dispose();
