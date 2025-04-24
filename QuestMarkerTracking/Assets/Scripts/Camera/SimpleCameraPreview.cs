@@ -39,6 +39,9 @@ public class SimpleCameraPreview : MonoBehaviour
     private CameraDevice _rightCameraDevice;
     private CaptureSessionObject<ContinuousCaptureSession> _rightCaptureSession;
 
+    private float _lastLogTime = 0;
+    private int _frameCount = 0;
+
     protected void Start()
     {
         // Deaktiviere UI-Elemente, wenn Preview nicht benötigt wird
@@ -113,13 +116,26 @@ public class SimpleCameraPreview : MonoBehaviour
 
         // Wähle eine niedrigere Auflösung (Teile durch 4)
         var supportedResolutions = _leftCameraInfo.SupportedResolutions;
+        
+        // Log alle verfügbaren Auflösungen
+        Debug.Log("Camera2: Available resolutions:");
+        for (int i = 0; i < supportedResolutions.Length; i++)
+        {
+            Debug.Log($"Camera2: Resolution {i}: {supportedResolutions[i].width}x{supportedResolutions[i].height}");
+        }
+        
         var selectedResolution = supportedResolutions.Length > 2 ? 
                                 supportedResolutions[supportedResolutions.Length - 3] : // Wähle eine niedrigere Auflösung
                                 supportedResolutions[0]; // Fallback zur niedrigsten Auflösung
         
-        Debug.Log($"Selected camera resolution: {selectedResolution.width}x{selectedResolution.height}");
+        Debug.Log($"Camera2: Selected camera resolution: {selectedResolution.width}x{selectedResolution.height}");
 
+        // Erstelle die Capture-Session mit YUV-Format für niedrigere Latenz
         _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(selectedResolution);
+        
+        // Hier könnten wir das Format auf YUV setzen, falls die API das unterstützt
+        // _leftCaptureSession.CaptureSession.SetPreferredFormat(PreferredFormat.YUV);
+        
         state = await _leftCaptureSession.CaptureSession.WaitForInitializationAsync();
         if (state != NativeWrapperState.Opened)
         {
@@ -128,6 +144,13 @@ public class SimpleCameraPreview : MonoBehaviour
             _leftCameraDevice.Destroy();
             (_leftCameraDevice, _leftCaptureSession) = (null, null);
             return;
+        }
+        
+        // Log die tatsächliche Auflösung der RenderTexture
+        if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
+        {
+            Debug.Log($"Camera2: Actual texture resolution: {_leftCaptureSession.TextureConverter.FrameRenderTexture.width}x{_leftCaptureSession.TextureConverter.FrameRenderTexture.height}");
+            Debug.Log($"Camera2: Texture format: {_leftCaptureSession.TextureConverter.FrameRenderTexture.format}");
         }
         
         // Nur die Textur zuweisen, wenn Preview aktiviert ist und UI-Element existiert
@@ -205,6 +228,29 @@ public class SimpleCameraPreview : MonoBehaviour
         {
             _rightCameraDevice.Destroy();
             _rightCameraDevice = null;
+        }
+    }
+
+    private void Update()
+    {
+        if (!AreCamerasReady) return;
+        
+        _frameCount++;
+        
+        // Log FPS alle 5 Sekunden
+        if (Time.time - _lastLogTime > 5f)
+        {
+            float fps = _frameCount / (Time.time - _lastLogTime);
+            Debug.Log($"Camera2: Current FPS: {fps:F1}");
+            
+            // Log aktuelle Auflösung erneut zur Überprüfung
+            if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
+            {
+                Debug.Log($"Camera2: Current texture resolution: {_leftCaptureSession.TextureConverter.FrameRenderTexture.width}x{_leftCaptureSession.TextureConverter.FrameRenderTexture.height}");
+            }
+            
+            _frameCount = 0;
+            _lastLogTime = Time.time;
         }
     }
 } 

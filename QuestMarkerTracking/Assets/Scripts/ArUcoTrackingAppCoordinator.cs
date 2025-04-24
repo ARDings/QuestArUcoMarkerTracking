@@ -218,10 +218,15 @@ namespace TryAR.MarkerTracking
         {
             try
             {
-                // Da wir bereits eine niedrigere Auflösung haben, können wir den Divider reduzieren
-                // oder sogar auf 1 setzen für die Verarbeitung
+                // Log der Eingabeauflösung
+                Debug.Log($"Camera2: Processing texture: {renderTexture.width}x{renderTexture.height}");
+                
+                // Da wir bereits eine niedrigere Auflösung haben, können wir den Divider auf 1 setzen
+                // für bessere Genauigkeit oder auf 2 für bessere Performance
                 int processWidth = renderTexture.width / m_processingDivider;
                 int processHeight = renderTexture.height / m_processingDivider;
+                
+                Debug.Log($"Camera2: Processing at resolution: {processWidth}x{processHeight}");
                 
                 // Erstelle eine temporäre RenderTexture mit reduzierter Größe
                 RenderTexture scaledRT = RenderTexture.GetTemporary(processWidth, processHeight, 0, renderTexture.format);
@@ -253,11 +258,19 @@ namespace TryAR.MarkerTracking
                 Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
                 Imgproc.dilate(m_thresholdMat, m_thresholdMat, dilateElement);
 
-                // Finde Konturen
+                // Verwende eine effizientere Kontursuche
                 List<MatOfPoint> contours = new List<MatOfPoint>();
                 Mat hierarchy = new Mat();
                 Imgproc.findContours(m_thresholdMat, contours, hierarchy, 
                     Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE);
+
+                // Früher Abbruch, wenn keine Konturen gefunden wurden
+                if (contours.Count == 0) {
+                    // Aufräumen
+                    rgbaMat.Dispose();
+                    hierarchy.Dispose();
+                    return;
+                }
 
                 double maxArea = 0;
                 Point maxCenter = new Point();
