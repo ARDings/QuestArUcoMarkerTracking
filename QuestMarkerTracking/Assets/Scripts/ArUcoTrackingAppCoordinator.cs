@@ -213,54 +213,24 @@ namespace TryAR.MarkerTracking
         {
             var nativeIntrinsics = PassthroughCameraUtils.GetCameraIntrinsics(CameraEye);
             
-            // Debug-Ausgabe aller verfügbaren Kamera-Eigenschaften
-            Debug.Log($"[Camera Debug] Camera Eye: {CameraEye}");
-            Debug.Log($"[Camera Debug] Resolution: {nativeIntrinsics.Resolution}");
-            Debug.Log($"[Camera Debug] Principal Point: {nativeIntrinsics.PrincipalPoint}");
-            Debug.Log($"[Camera Debug] Focal Length: {nativeIntrinsics.FocalLength}");
+            // Get actual camera resolution from SimpleCameraPreview
+            var actualResolution = m_cameraPreview.GetCurrentResolution();
+            Debug.Log($"[Camera Debug] Actual Camera Resolution: {actualResolution.x}x{actualResolution.y}");
             
-            // Versuche alle öffentlichen Properties der Intrinsics auszulesen
-            var type = nativeIntrinsics.GetType();
-            var properties = type.GetProperties();
-            Debug.Log("[Camera Debug] All available properties:");
-            foreach (var prop in properties)
-            {
-                try
-                {
-                    var value = prop.GetValue(nativeIntrinsics);
-                    Debug.Log($"[Camera Debug] {prop.Name}: {value}");
-                }
-                catch (System.Exception e)
-                {
-                    Debug.Log($"[Camera Debug] Could not read {prop.Name}: {e.Message}");
-                }
-            }
+            // Use actual resolution instead of native intrinsics resolution
+            var width = actualResolution.x / m_processingDivider;
+            var height = actualResolution.y / m_processingDivider;
             
-            // Versuche auch private Felder zu lesen
-            var fields = type.GetFields(System.Reflection.BindingFlags.NonPublic | 
-                                       System.Reflection.BindingFlags.Instance | 
-                                       System.Reflection.BindingFlags.Public);
-            Debug.Log("[Camera Debug] All available fields:");
-            foreach (var field in fields)
-            {
-                try
-                {
-                    var value = field.GetValue(nativeIntrinsics);
-                    Debug.Log($"[Camera Debug] {field.Name}: {value}");
-                }
-                catch (System.Exception e)
-                {
-                    Debug.Log($"[Camera Debug] Could not read {field.Name}: {e.Message}");
-                }
-            }
-
-            // Rest des ursprünglichen Codes...
-            var cx = nativeIntrinsics.PrincipalPoint.x / m_processingDivider;
-            var cy = nativeIntrinsics.PrincipalPoint.y / m_processingDivider;
-            var fx = nativeIntrinsics.FocalLength.x / m_processingDivider;
-            var fy = nativeIntrinsics.FocalLength.y / m_processingDivider;
-            var width = nativeIntrinsics.Resolution.x / m_processingDivider;
-            var height = nativeIntrinsics.Resolution.y / m_processingDivider;
+            // Scale intrinsics to match actual resolution
+            float scaleX = (float)actualResolution.x / nativeIntrinsics.Resolution.x;
+            float scaleY = (float)actualResolution.y / nativeIntrinsics.Resolution.y;
+            
+            var cx = nativeIntrinsics.PrincipalPoint.x * scaleX / m_processingDivider;
+            var cy = nativeIntrinsics.PrincipalPoint.y * scaleY / m_processingDivider;
+            var fx = nativeIntrinsics.FocalLength.x * scaleX / m_processingDivider;
+            var fy = nativeIntrinsics.FocalLength.y * scaleY / m_processingDivider;
+            
+            Debug.Log($"[Camera Debug] Scaled Parameters: width={width}, height={height}, cx={cx}, cy={cy}, fx={fx}, fy={fy}");
             
             m_arucoMarkerTracking.Initialize(width, height, cx, cy, fx, fy);
             BuildMarkerDictionary();

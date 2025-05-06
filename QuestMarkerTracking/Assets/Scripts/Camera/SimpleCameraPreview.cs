@@ -133,8 +133,22 @@ public class SimpleCameraPreview : MonoBehaviour
         // Erstelle die Capture-Session mit YUV-Format für niedrigere Latenz
         _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(selectedResolution);
         
-        // Hier könnten wir das Format auf YUV setzen, falls die API das unterstützt
-        // _leftCaptureSession.CaptureSession.SetPreferredFormat(PreferredFormat.YUV);
+        // Add validation check for texture
+        if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
+        {
+            var texture = _leftCaptureSession.TextureConverter.FrameRenderTexture;
+            Debug.Log($"Camera2: Actual texture resolution: {texture.width}x{texture.height}");
+            Debug.Log($"Camera2: Texture format: {texture.format}");
+            
+            // Ensure texture is readable
+            texture.enableRandomWrite = true;
+            texture.Create();
+        }
+        else
+        {
+            Debug.LogError("Failed to create camera texture!");
+            return;
+        }
         
         state = await _leftCaptureSession.CaptureSession.WaitForInitializationAsync();
         if (state != NativeWrapperState.Opened)
@@ -252,5 +266,15 @@ public class SimpleCameraPreview : MonoBehaviour
             _frameCount = 0;
             _lastLogTime = Time.time;
         }
+    }
+
+    public Vector2Int GetCurrentResolution()
+    {
+        if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
+        {
+            var texture = _leftCaptureSession.TextureConverter.FrameRenderTexture;
+            return new Vector2Int(texture.width, texture.height);
+        }
+        return Vector2Int.zero;
     }
 } 

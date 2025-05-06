@@ -1647,8 +1647,8 @@ MonoBehaviour:
   - markerId: 0
     gameObject: {fileID: 868232210}
   m_spawnedObjectsContainer: {fileID: 0}
-  m_enableMarkerTracking: 0
-  m_enableColorTracking: 1
+  m_enableMarkerTracking: 1
+  m_enableColorTracking: 0
   m_showColorDebugView: 0
   m_ballDiameterInMeters: 0.3
   m_ballVisualization: {fileID: 436612660}
