@@ -166,14 +166,18 @@ namespace TryAR.MarkerTracking
 
             if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
             {
-                m_arucoMarkerTracking.DetectMarker(m_cameraPreview.LeftCameraTexture);
-                
-                if (m_markerGameObjectDictionary.Count > 0)
+                var frame = m_cameraPreview.GetCurrentFrame();
+                if (frame.IsValid)
                 {
-                    m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
-                        m_markerGameObjectDictionary,
-                        m_cameraAnchor
-                    );
+                    m_arucoMarkerTracking.DetectMarker(frame.Texture);
+                    
+                    if (m_markerGameObjectDictionary.Count > 0)
+                    {
+                        m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
+                            m_markerGameObjectDictionary,
+                            m_cameraAnchor
+                        );
+                    }
                 }
             }
 

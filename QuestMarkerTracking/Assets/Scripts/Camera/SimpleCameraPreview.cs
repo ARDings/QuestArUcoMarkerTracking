@@ -1,6 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 using Uralstech.UXR.QuestCamera;
+using System;  // Für Exception
 
 public class SimpleCameraPreview : MonoBehaviour
 {
@@ -42,6 +43,44 @@ public class SimpleCameraPreview : MonoBehaviour
     private float _lastLogTime = 0;
     private int _frameCount = 0;
 
+    // Neue Struktur für die Timestamps
+    public struct FrameTimestamps
+    {
+        public long SensorTimestampNs;  // Camera sensor timestamp
+        public long SystemTimestampNs;  // Android system timestamp
+        public long UnixTimestampMs;    // Unix timestamp
+    }
+
+    private FrameTimestamps _currentFrameTimestamps;
+    public FrameTimestamps CurrentFrameTimestamps => _currentFrameTimestamps;
+
+    // Struktur für einen kompletten Frame mit allen Daten
+    public struct CameraFrame
+    {
+        public RenderTexture Texture;
+        public FrameTimestamps Timestamps;
+        public bool IsValid => Texture != null;
+    }
+
+    // Neue Methode, die Textur und Timestamps zusammen zurückgibt
+    public CameraFrame GetCurrentFrame()
+    {
+        var frame = new CameraFrame
+        {
+            Texture = LeftCameraTexture,
+            Timestamps = CurrentFrameTimestamps
+        };
+        //erstelle eine vergleichbare unity Zeit, damit wir sehen, ob unsere timelines zusammenpassen
+ 
+        Debug.Log($"[Camera Frame] GetCurrentFrame called - " +
+                  $"\n  Texture: {(frame.Texture != null ? $"{frame.Texture.width}x{frame.Texture.height}" : "null")}" +
+                  $"\n  Sensor Time: {frame.Timestamps.SensorTimestampNs}ns" +
+                  $"\n  System Time: {frame.Timestamps.SystemTimestampNs}ns" +
+                  $"\n  Unix Time: {frame.Timestamps.UnixTimestampMs}ms");
+                  
+        return frame;
+    }
+
     protected void Start()
     {
         // Deaktiviere UI-Elemente, wenn Preview nicht benötigt wird
@@ -77,34 +116,20 @@ public class SimpleCameraPreview : MonoBehaviour
         }
     }
 
-    private void InitializeCameras()
+    private async void InitializeCameras()
     {
         // Get the left eye camera
         _leftCameraInfo = UCameraManager.Instance.GetCamera(CameraInfo.CameraEye.Left);
         Debug.Log($"Got left camera info: {_leftCameraInfo}");
-        
-        if (_useBothCameras)
-        {
-            // Get the right eye camera
-            _rightCameraInfo = UCameraManager.Instance.GetCamera(CameraInfo.CameraEye.Right);
-            Debug.Log($"Got right camera info: {_rightCameraInfo}");
-        }
 
-        // Start cameras automatically
-        StartCameras();
-    }
-
-    private async void StartCameras()
-    {
-        // Start left camera
         if (_leftCameraInfo == null)
         {
-            Debug.LogError("No left camera info available");
+            Debug.LogError("Failed to get left camera info.");
             return;
         }
 
         _leftCameraDevice = UCameraManager.Instance.OpenCamera(_leftCameraInfo);
-        NativeWrapperState state = await _leftCameraDevice.WaitForInitializationAsync();
+        var state = await _leftCameraDevice.WaitForInitializationAsync();
         if (state != NativeWrapperState.Opened)
         {
             Debug.LogError("Failed to open left camera.");
@@ -114,42 +139,23 @@ public class SimpleCameraPreview : MonoBehaviour
         }
         Debug.Log("Left camera opened.");
 
-        // Wähle eine niedrigere Auflösung (Teile durch 4)
-        var supportedResolutions = _leftCameraInfo.SupportedResolutions;
+        // Wähle eine niedrigere Auflösung für bessere Performance
+        var leftSupportedResolutions = _leftCameraInfo.SupportedResolutions;
+        var leftSelectedResolution = leftSupportedResolutions.Length > 2 ? 
+                                    leftSupportedResolutions[leftSupportedResolutions.Length - 3] : 
+                                    leftSupportedResolutions[0];
         
-        // Log alle verfügbaren Auflösungen
-        Debug.Log("Camera2: Available resolutions:");
-        for (int i = 0; i < supportedResolutions.Length; i++)
-        {
-            Debug.Log($"Camera2: Resolution {i}: {supportedResolutions[i].width}x{supportedResolutions[i].height}");
-        }
+        Debug.Log($"Selected left camera resolution: {leftSelectedResolution.width}x{leftSelectedResolution.height}");
         
-        var selectedResolution = supportedResolutions.Length > 2 ? 
-                                supportedResolutions[supportedResolutions.Length - 3] : // Wähle eine niedrigere Auflösung
-                                supportedResolutions[0]; // Fallback zur niedrigsten Auflösung
+        _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(leftSelectedResolution);
         
-        Debug.Log($"Camera2: Selected camera resolution: {selectedResolution.width}x{selectedResolution.height}");
+        // Registriere den Timestamp-Handler, wenn die Session initialisiert ist
+        _leftCaptureSession.CaptureSession.OnSessionRequestSet.AddListener(() => {
+            Debug.Log("[SimpleCameraPreview] Session initialized, subscribing to timestamps");
+            _leftCaptureSession.CaptureSession.OnFrameTimestamps += OnFrameTimestamps;
+            Debug.Log("[SimpleCameraPreview] Successfully subscribed to timestamps");
+        });
 
-        // Erstelle die Capture-Session mit YUV-Format für niedrigere Latenz
-        _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(selectedResolution);
-        
-        // Add validation check for texture
-        if (_leftCaptureSession?.TextureConverter?.FrameRenderTexture != null)
-        {
-            var texture = _leftCaptureSession.TextureConverter.FrameRenderTexture;
-            Debug.Log($"Camera2: Actual texture resolution: {texture.width}x{texture.height}");
-            Debug.Log($"Camera2: Texture format: {texture.format}");
-            
-            // Ensure texture is readable
-            texture.enableRandomWrite = true;
-            texture.Create();
-        }
-        else
-        {
-            Debug.LogError("Failed to create camera texture!");
-            return;
-        }
-        
         state = await _leftCaptureSession.CaptureSession.WaitForInitializationAsync();
         if (state != NativeWrapperState.Opened)
         {
@@ -220,6 +226,12 @@ public class SimpleCameraPreview : MonoBehaviour
 
     protected void OnDestroy()
     {
+        // Unsubscribe von Events
+        if (_leftCaptureSession?.CaptureSession != null)
+        {
+            _leftCaptureSession.CaptureSession.OnFrameTimestamps -= OnFrameTimestamps;
+        }
+
         // Cleanup left camera
         if (_leftCaptureSession != null)
         {
@@ -276,5 +288,22 @@ public class SimpleCameraPreview : MonoBehaviour
             return new Vector2Int(texture.width, texture.height);
         }
         return Vector2Int.zero;
+    }
+
+    private void OnFrameTimestamps(long sensorTs, long systemTs, long unixTs)
+    {
+        Debug.Log($"[SimpleCameraPreview] OnFrameTimestamps called - Sensor: {sensorTs}, System: {systemTs}, Unix: {unixTs}");
+        
+        _currentFrameTimestamps = new FrameTimestamps
+        {
+            SensorTimestampNs = sensorTs,
+            SystemTimestampNs = systemTs,
+            UnixTimestampMs = unixTs
+        };
+        
+        Debug.Log($"[SimpleCameraPreview] Timestamps updated - Current values:" +
+                  $"\n  Sensor: {_currentFrameTimestamps.SensorTimestampNs}ns" +
+                  $"\n  System: {_currentFrameTimestamps.SystemTimestampNs}ns" +
+                  $"\n  Unix: {_currentFrameTimestamps.UnixTimestampMs}ms");
     }
 } 
