@@ -103,6 +103,20 @@ namespace TryAR.MarkerTracking
         private volatile bool m_isProcessing;
         private object m_matLock = new object();
 
+        // Add a struct to store camera poses with timestamps
+        private struct TimestampedCameraPose
+        {
+            public long Timestamp;  // Using sensor timestamp as reference
+            public Vector3 Position;
+            public Quaternion Rotation;
+        }
+
+        // Add a ring buffer to store recent camera poses
+        [SerializeField, Tooltip("Number of camera poses to store in history")]
+        private int m_cameraPoseHistorySize = 60; // Adjust based on your framerate and needed history length
+        private TimestampedCameraPose[] m_cameraPoseHistory;
+        private int m_cameraPoseHistoryIndex = 0;
+
         // Strukturen für Thread-sichere Datenübergabe
         private struct RenderTextureData
         {
@@ -119,6 +133,10 @@ namespace TryAR.MarkerTracking
             public Vector3 WorldPosition;
             public float Diameter;
         }
+
+        // Add these fields to track time synchronization
+        private bool m_timeOffsetInitialized = false;
+        private long m_systemToUnityTimeOffsetNs = 0;
 
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
@@ -153,6 +171,21 @@ namespace TryAR.MarkerTracking
             // Start processing thread
             m_processingThread = new Thread(ProcessingThreadFunction);
             m_processingThread.Start();
+
+            // Subscribe to frame timestamps for time synchronization
+            SubscribeToFrameTimestamps();
+
+            // Initialize camera pose history
+            m_cameraPoseHistory = new TimestampedCameraPose[m_cameraPoseHistorySize];
+            for (int i = 0; i < m_cameraPoseHistorySize; i++)
+            {
+                m_cameraPoseHistory[i] = new TimestampedCameraPose 
+                { 
+                    Timestamp = 0, 
+                    Position = Vector3.zero, 
+                    Rotation = Quaternion.identity 
+                };
+            }
         }
 
         /// <summary>
@@ -162,21 +195,31 @@ namespace TryAR.MarkerTracking
         {
             if (!m_cameraPreview.AreCamerasReady) return;
 
-            UpdateCameraPoses();
+            // Store current camera pose with current system time
+            StoreCameraPose();
 
             if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
             {
                 var frame = m_cameraPreview.GetCurrentFrame();
                 if (frame.IsValid)
                 {
+                    Debug.Log($"[ArUco Tracking] Detecting marker with timestamp: {frame.Timestamps.UnixTimestampMs}, {frame.Timestamps.SensorTimestampNs}, {frame.Timestamps.SystemTimestampNs}");
+                    
+                    // Get the correct historical camera pose for this frame
+                    Transform historicalCameraTransform = GetCameraPoseForTimestamp(frame.Timestamps.SensorTimestampNs);
+                    
                     m_arucoMarkerTracking.DetectMarker(frame.Texture);
                     
                     if (m_markerGameObjectDictionary.Count > 0)
                     {
+                        // Use the historical camera transform instead of the current one
                         m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
                             m_markerGameObjectDictionary,
-                            m_cameraAnchor
+                            historicalCameraTransform
                         );
+                        
+                        // Clean up the temporary transform
+                        CleanupTemporaryTransform(historicalCameraTransform);
                     }
                 }
             }
@@ -260,6 +303,7 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void UpdateCameraPoses()
         {
+            // We still update m_cameraAnchor for other purposes
             var headPose = OVRPlugin.GetNodePoseStateImmediate(OVRPlugin.Node.Head).Pose.ToOVRPose();
             var cameraPose = PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye);
             m_cameraAnchor.position = cameraPose.position;
@@ -620,6 +664,77 @@ namespace TryAR.MarkerTracking
             }
         }
 
+        /// <summary>
+        /// Stores the current camera pose with current timestamp
+        /// </summary>
+        private void StoreCameraPose()
+        {
+            var cameraPose = PassthroughCameraUtils.GetCameraPoseInWorld(CameraEye);
+            
+            // Get current Unity time in nanoseconds
+            long unityTimeNs = (long)(Time.realtimeSinceStartupAsDouble * 1000000000);
+            
+            // Apply offset to convert Unity time to system time equivalent
+            long adjustedTimestamp = unityTimeNs;
+            if (m_timeOffsetInitialized)
+            {
+                adjustedTimestamp = unityTimeNs + m_systemToUnityTimeOffsetNs;
+            }
+
+            // Store in ring buffer
+            m_cameraPoseHistoryIndex = (m_cameraPoseHistoryIndex + 1) % m_cameraPoseHistorySize;
+            m_cameraPoseHistory[m_cameraPoseHistoryIndex] = new TimestampedCameraPose
+            {
+                Timestamp = adjustedTimestamp,
+                Position = cameraPose.position,
+                Rotation = cameraPose.rotation
+            };
+        }
+
+        /// <summary>
+        /// Returns a transform representing the camera pose at the given timestamp
+        /// </summary>
+        private Transform GetCameraPoseForTimestamp(long sensorTimestamp)
+        {
+            // Find the closest matching pose in our history
+            int bestIndex = 0;
+            long bestTimeDiff = long.MaxValue;
+
+            for (int i = 0; i < m_cameraPoseHistorySize; i++)
+            {
+                long timeDiff = Math.Abs(m_cameraPoseHistory[i].Timestamp - sensorTimestamp);
+                if (timeDiff < bestTimeDiff)
+                {
+                    bestTimeDiff = timeDiff;
+                    bestIndex = i;
+                }
+            }
+
+            // Create a temporary transform with the historical pose
+            GameObject tempObj = new GameObject("TemporaryHistoricalCameraPose");
+            tempObj.transform.position = m_cameraPoseHistory[bestIndex].Position;
+            tempObj.transform.rotation = m_cameraPoseHistory[bestIndex].Rotation;
+            
+            // Calculate and log the time difference
+            float timeDiffMs = bestTimeDiff / 1000000.0f;  // Convert ns to ms
+            Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. " +
+                      $"Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
+
+            return tempObj.transform;
+        }
+
+        /// <summary>
+        /// Cleans up the temporary transform created for historical camera pose
+        /// This should be called after using the transform for marker detection
+        /// </summary>
+        private void CleanupTemporaryTransform(Transform tempTransform)
+        {
+            if (tempTransform != null && tempTransform.gameObject.name == "TemporaryHistoricalCameraPose")
+            {
+                Destroy(tempTransform.gameObject);
+            }
+        }
+
         private void OnDestroy()
         {
             // Stop processing thread
@@ -629,6 +744,40 @@ namespace TryAR.MarkerTracking
             if (m_rgbMat != null) m_rgbMat.Dispose();
             if (m_hsvMat != null) m_hsvMat.Dispose();
             if (m_thresholdMat != null) m_thresholdMat.Dispose();
+        }
+
+        // Add a new method to calculate time offset
+        private void CalculateTimeOffset(long systemTimeNs)
+        {
+            // Get current Unity time in nanoseconds
+            long unityTimeNs = (long)(Time.realtimeSinceStartupAsDouble * 1000000000);
+            
+            // Calculate the offset (system time - Unity time)
+            m_systemToUnityTimeOffsetNs = systemTimeNs - unityTimeNs;
+            m_timeOffsetInitialized = true;
+            
+            Debug.Log($"[Time Sync] Time offset calculated: {m_systemToUnityTimeOffsetNs/1000000.0f}ms. " +
+                      $"System: {systemTimeNs/1000000.0f}ms, Unity: {unityTimeNs/1000000.0f}ms");
+        }
+
+        // Add method to subscribe to the camera timestamps
+        private void SubscribeToFrameTimestamps()
+        {
+            if (m_cameraPreview != null)
+            {
+                // Subscribe to the timestamp event
+                m_cameraPreview.OnFrameTimestampsUpdated += OnFrameTimestampsUpdated;
+            }
+        }
+
+        // Handler for frame timestamp updates
+        private void OnFrameTimestampsUpdated(SimpleCameraPreview.FrameTimestamps timestamps)
+        {
+            if (!m_timeOffsetInitialized)
+            {
+                // Initialize time offset on first frame
+                CalculateTimeOffset(timestamps.SystemTimestampNs);
+            }
         }
     }
 }

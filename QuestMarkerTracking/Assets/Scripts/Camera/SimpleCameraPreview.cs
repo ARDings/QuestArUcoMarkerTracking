@@ -81,6 +81,9 @@ public class SimpleCameraPreview : MonoBehaviour
         return frame;
     }
 
+    // Add this event for timestamp notifications
+    public event Action<FrameTimestamps> OnFrameTimestampsUpdated;
+
     protected void Start()
     {
         // Deaktiviere UI-Elemente, wenn Preview nicht benötigt wird
@@ -300,6 +303,9 @@ public class SimpleCameraPreview : MonoBehaviour
             SystemTimestampNs = systemTs,
             UnixTimestampMs = unixTs
         };
+        
+        // Fire the event to notify subscribers
+        OnFrameTimestampsUpdated?.Invoke(_currentFrameTimestamps);
         
         Debug.Log($"[SimpleCameraPreview] Timestamps updated - Current values:" +
                   $"\n  Sensor: {_currentFrameTimestamps.SensorTimestampNs}ns" +

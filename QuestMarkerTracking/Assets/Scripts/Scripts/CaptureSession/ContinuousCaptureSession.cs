@@ -115,6 +115,9 @@ namespace Uralstech.UXR.QuestCamera
             {
                 var metadata = JsonUtility.FromJson<FrameMetadata>(jsonData);
                 
+                // Store the current Unity time when the frame arrives
+                long unityTimeNs = (long)(Time.realtimeSinceStartupAsDouble * 1000000000);
+                
                 var frameData = new FrameData
                 {
                     Image = null,
@@ -122,8 +125,12 @@ namespace Uralstech.UXR.QuestCamera
                     SensorTimestamp = metadata.timestamps.sensorTs,
                     SystemTimestamp = metadata.timestamps.systemTs,
                     UnixTimestamp = metadata.timestamps.unixTs,
-                    TextureUpdateTime = (long)(Time.realtimeSinceStartupAsDouble * 1000000000)
+                    TextureUpdateTime = unityTimeNs  // Use current Unity time
                 };
+
+                // Log the reception delay
+                long receptionDelay = unityTimeNs - metadata.timestamps.systemTs;
+                Debug.Log($"[Frame Timing] Frame reception delay: {receptionDelay/1000000.0f}ms");
 
                 lock (_queueLock)
                 {
