@@ -162,6 +162,20 @@ namespace TryAR.MarkerTracking
         private int m_processedFrameCount = 0;
         private int m_skippedFrameCount = 0;
 
+        [Header("Grid Board Configuration")]
+        [SerializeField, Tooltip("Whether to require all markers in the grid board to be detected simultaneously")]
+        private bool m_requireAllGridBoardMarkers = true;
+        [SerializeField, Tooltip("Number of markers in the grid board")]
+        private int m_expectedMarkerCount = 6;
+        [SerializeField, Tooltip("IDs of markers in the grid board (0-5 for a 6-marker board)")]
+        private List<int> m_gridBoardMarkerIds = new List<int> { 0, 1, 2, 3, 4, 5 };
+        [SerializeField, Tooltip("Size of each marker in millimeters")]
+        private float m_markerSizeInMm = 50f;
+
+        // Track detected markers in the current frame
+        private HashSet<int> m_detectedMarkersInCurrentFrame = new HashSet<int>();
+        private bool m_allGridMarkersDetected = false;
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -251,21 +265,66 @@ namespace TryAR.MarkerTracking
                         long timeDiff = Math.Abs(m_cameraPoseHistory[m_cameraPoseHistoryIndex].Timestamp - frame.Timestamps.SensorTimestampNs);
                         float timeDiffMs = timeDiff / 1000000.0f;
                         
-                        if (timeDiffMs <= m_currentTimeDifferenceThresholdMs)
+                        if (timeDiffMs <= m_currentTimeDifferenceThresholdMs && historicalCameraTransform != null)
                         {
+                            // Clear previously detected markers
+                            m_detectedMarkersInCurrentFrame.Clear();
+                            m_allGridMarkersDetected = false;
+                            
+                            // Detect markers in the current frame
                             m_arucoMarkerTracking.DetectMarker(frame.Texture);
                             
-                            if (m_markerGameObjectDictionary.Count > 0)
+                            // After detection, check which markers were found and update our set
+                            HashSet<int> detectedMarkers = m_arucoMarkerTracking.GetDetectedMarkerIds();
+                            
+                            // If we're requiring all grid board markers, check if all expected markers were detected
+                            if (m_requireAllGridBoardMarkers)
                             {
-                                // Use the historical camera transform instead of the current one
-                                m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
-                                    m_markerGameObjectDictionary,
-                                    historicalCameraTransform
-                                );
+                                m_allGridMarkersDetected = true;
+                                foreach (int markerId in m_gridBoardMarkerIds)
+                                {
+                                    if (!detectedMarkers.Contains(markerId))
+                                    {
+                                        m_allGridMarkersDetected = false;
+                                        break;
+                                    }
+                                }
                                 
-                                // Clean up the temporary transform
-                                CleanupTemporaryTransform(historicalCameraTransform);
+                                if (m_allGridMarkersDetected)
+                                {
+                                    Debug.Log($"[Grid Board] All {m_expectedMarkerCount} markers detected in a single frame!");
+                                    
+                                    // Only process pose estimation if all markers are detected
+                                    if (m_markerGameObjectDictionary.Count > 0)
+                                    {
+                                        // Use the historical camera transform instead of the current one
+                                        m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
+                                            m_markerGameObjectDictionary,
+                                            historicalCameraTransform
+                                        );
+                                    }
+                                }
+                                else
+                                {
+                                    Debug.Log($"[Grid Board] Only {detectedMarkers.Count}/{m_expectedMarkerCount} markers detected. Skipping pose estimation.");
+                                    // Hide or reset marker visualizations when not all markers are detected
+                                    SetMarkerObjectsVisibility(false);
+                                }
                             }
+                            else
+                            {
+                                // Original behavior - process any detected markers
+                                if (m_markerGameObjectDictionary.Count > 0)
+                                {
+                                    m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
+                                        m_markerGameObjectDictionary,
+                                        historicalCameraTransform
+                                    );
+                                }
+                            }
+                            
+                            // Clean up the temporary transform
+                            CleanupTemporaryTransform(historicalCameraTransform);
                         }
                         else
                         {

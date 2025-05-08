@@ -401,5 +401,23 @@ namespace TryAR.MarkerTracking
             DICT_7X7_1000 = Objdetect.DICT_7X7_1000,
             DICT_ARUCO_ORIGINAL = Objdetect.DICT_ARUCO_ORIGINAL,
         }
+
+        public HashSet<int> GetDetectedMarkerIds()
+        {
+            HashSet<int> detectedIds = new HashSet<int>();
+            
+            // Add all detected marker IDs to the HashSet
+            // This assumes m_ids is a collection storing the most recent detection results
+            if (_detectedMarkerIds != null && _detectedMarkerIds.rows() > 0)
+            {
+                for (int i = 0; i < _detectedMarkerIds.rows(); i++)
+                {
+                    int id = (int)_detectedMarkerIds.get(i, 0)[0];
+                    detectedIds.Add(id);
+                }
+            }
+            
+            return detectedIds;
+        }
     }
 }
