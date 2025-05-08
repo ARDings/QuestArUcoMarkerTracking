@@ -1668,6 +1668,8 @@ MonoBehaviour:
   m_expectedMarkerCount: 6
   m_gridBoardMarkerIds: 000000000100000002000000030000000400000005000000
   m_markerSizeInMm: 50
+  m_manualTimeOffsetMs: 10
+  m_timeOffsetAdjustSpeed: 1
 --- !u!1 &340539805
 GameObject:
   m_ObjectHideFlags: 0

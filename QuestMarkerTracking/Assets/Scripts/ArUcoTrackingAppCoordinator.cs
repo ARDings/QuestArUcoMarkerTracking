@@ -176,6 +176,13 @@ namespace TryAR.MarkerTracking
         private HashSet<int> m_detectedMarkersInCurrentFrame = new HashSet<int>();
         private bool m_allGridMarkersDetected = false;
 
+        [Header("Time Synchronization")]
+        [SerializeField, Tooltip("Manual adjustment offset for timestamp matching (positive values look further back in time, negative values look forward)")]
+        private float m_manualTimeOffsetMs = 0.0f;  // Default to no offset
+        [SerializeField, Tooltip("Adjustment speed for time offset")]
+        private float m_timeOffsetAdjustSpeed = 1.0f;
+        private bool m_isAdjustingTimeOffset = false;
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -521,6 +528,29 @@ namespace TryAR.MarkerTracking
             bool leftTrigger = OVRInput.Get(OVRInput.Button.PrimaryIndexTrigger);
             bool rightTrigger = OVRInput.Get(OVRInput.Button.SecondaryIndexTrigger);
             bool leftGrip = OVRInput.Get(OVRInput.Button.PrimaryHandTrigger);
+            bool rightGrip = OVRInput.Get(OVRInput.Button.SecondaryHandTrigger);
+
+            // New code: Press left and right grip at the same time to adjust time offset
+            if (leftGrip && rightGrip)
+            {
+                if (!m_isAdjustingTimeOffset)
+                {
+                    m_isAdjustingTimeOffset = true;
+                    Debug.Log($"[Time Sync] Started adjusting time offset. Current value: {m_manualTimeOffsetMs}ms");
+                }
+
+                // Use right stick Y-axis to adjust time offset
+                if (Mathf.Abs(rightStick.y) > 0.1f)
+                {
+                    m_manualTimeOffsetMs += rightStick.y * m_timeOffsetAdjustSpeed;
+                    Debug.Log($"[Time Sync] Adjusted time offset to {m_manualTimeOffsetMs}ms");
+                }
+            }
+            else if (m_isAdjustingTimeOffset)
+            {
+                m_isAdjustingTimeOffset = false;
+                Debug.Log($"[Time Sync] Finished adjusting time offset. Final value: {m_manualTimeOffsetMs}ms");
+            }
 
             // Linker Stick: Hue Min/Max
             if (Mathf.Abs(leftStick.x) > 0.1f)
@@ -819,19 +849,22 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private Transform GetCameraPoseForTimestamp(long sensorTimestamp)
         {
+            // Apply the manual offset to the target timestamp
+            long adjustedTimestamp = sensorTimestamp - (long)(m_manualTimeOffsetMs * 1000000); // Convert ms to ns
+
             // Find the closest matching pose in our history
             int bestIndex = 0;
             long bestTimeDiff = long.MaxValue;
             bool foundGoodMatch = false;
 
-            Debug.Log($"[Camera Sync] Checking pose match for frame {sensorTimestamp}. Available timestamps: " + 
+            Debug.Log($"[Camera Sync] Checking pose match for frame {adjustedTimestamp} (original: {sensorTimestamp}, offset: {m_manualTimeOffsetMs}ms). Available timestamps: " + 
                       string.Join(", ", m_cameraPoseHistory.Where(p => p.Timestamp > 0).Select(p => p.Timestamp).ToArray()));
 
             for (int i = 0; i < m_cameraPoseHistorySize; i++)
             {
                 if (m_cameraPoseHistory[i].Timestamp == 0) continue; // Skip uninitialized entries
                 
-                long timeDiff = Math.Abs(m_cameraPoseHistory[i].Timestamp - sensorTimestamp);
+                long timeDiff = Math.Abs(m_cameraPoseHistory[i].Timestamp - adjustedTimestamp);
                 if (timeDiff < bestTimeDiff)
                 {
                     bestTimeDiff = timeDiff;
