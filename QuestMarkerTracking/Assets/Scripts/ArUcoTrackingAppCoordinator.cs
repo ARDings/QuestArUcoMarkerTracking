@@ -294,6 +294,9 @@ namespace TryAR.MarkerTracking
                                 {
                                     Debug.Log($"[Grid Board] All {m_expectedMarkerCount} markers detected in a single frame!");
                                     
+                                    // Make marker objects visible when all markers are detected
+                                    SetMarkerObjectsVisibility(true);
+                                    
                                     // Only process pose estimation if all markers are detected
                                     if (m_markerGameObjectDictionary.Count > 0)
                                     {
