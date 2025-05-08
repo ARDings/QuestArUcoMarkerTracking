@@ -332,11 +332,12 @@ namespace TryAR.MarkerTracking
                                                                    qualityClass == ArUcoMarkerTracking.DetectionQualityClass.Excellent);
                                     
                                     // Make marker objects visible when all markers are detected with sufficient quality
-                                    SetMarkerObjectsVisibility(isHighQualityDetection);
+                                    
                                     
                                     // Only process pose estimation if detection quality is sufficient
                                     if (isHighQualityDetection)
                                     {
+                                        SetMarkerObjectsVisibility(isHighQualityDetection);
                                         // Use the historical camera transform instead of the current one
                                         m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
                                             m_markerGameObjectDictionary,
@@ -352,7 +353,7 @@ namespace TryAR.MarkerTracking
                                 {
                                     Debug.Log($"[Grid Board] Only {detectedMarkers.Count}/{m_expectedMarkerCount} markers detected. Skipping pose estimation.");
                                     // Hide or reset marker visualizations when not all markers are detected
-                                    SetMarkerObjectsVisibility(false);
+                                    //SetMarkerObjectsVisibility(false);
                                 }
                             }
                             else
