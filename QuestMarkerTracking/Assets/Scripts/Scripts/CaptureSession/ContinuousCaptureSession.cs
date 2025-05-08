@@ -107,6 +107,10 @@ namespace Uralstech.UXR.QuestCamera
             public TimestampData timestamps;
         }
 
+        // Add these fields to track time synchronization
+        private bool _timeOffsetInitialized = false;
+        private long _systemToUnityTimeOffsetNs = 0;
+
         public void _onImageAvailable(string jsonData)
         {
             Debug.Log($"[ContinuousCaptureSession] _onImageAvailable called with data: {jsonData}");
@@ -128,9 +132,26 @@ namespace Uralstech.UXR.QuestCamera
                     TextureUpdateTime = unityTimeNs  // Use current Unity time
                 };
 
-                // Log the reception delay
-                long receptionDelay = unityTimeNs - metadata.timestamps.systemTs;
-                Debug.Log($"[Frame Timing] Frame reception delay: {receptionDelay/1000000.0f}ms");
+                // Calculate reception delay properly
+                long receptionDelay;
+                if (_timeOffsetInitialized)
+                {
+                    // Get current Unity time in nanoseconds 
+                    long currentUnityTimeNs = (long)(Time.realtimeSinceStartupAsDouble * 1000000000);
+                    // Convert Unity time to system time base
+                    long estimatedCurrentSystemTimeNs = currentUnityTimeNs + _systemToUnityTimeOffsetNs;
+                    // Calculate delay from frame capture to now
+                    receptionDelay = estimatedCurrentSystemTimeNs - metadata.timestamps.systemTs;
+                    
+                    Debug.Log($"[Frame Timing] Frame reception delay: {receptionDelay/1000000.0f}ms " +
+                              $"(current system: {estimatedCurrentSystemTimeNs/1000000.0f}, frame system: {metadata.timestamps.systemTs/1000000.0f})");
+                }
+                else
+                {
+                    // If time offset isn't initialized yet, show a warning
+                    receptionDelay = (long)(Time.realtimeSinceStartupAsDouble * 1000000000) - metadata.timestamps.systemTs;
+                    Debug.LogWarning($"[Frame Timing] Time offset not initialized yet, delay calculation may be incorrect: {receptionDelay/1000000.0f}ms");
+                }
 
                 lock (_queueLock)
                 {
@@ -273,5 +294,13 @@ namespace Uralstech.UXR.QuestCamera
         }
 #pragma warning restore IDE1006 // Naming Styles
         #endregion
+
+        // Add a method to set the time offset
+        public void SetTimeOffset(long offset) 
+        {
+            _systemToUnityTimeOffsetNs = offset;
+            _timeOffsetInitialized = true;
+            Debug.Log($"[ContinuousCaptureSession] Time offset set to {offset/1000000.0f}ms");
+        }
     }
 }

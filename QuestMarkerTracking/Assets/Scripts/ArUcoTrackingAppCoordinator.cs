@@ -15,6 +15,7 @@ using TryAR.ColorTracking;  // Für die ColorObject Klasse
 using System.Threading;
 using System.Collections.Concurrent;
 using OpenCVForUnity.Calib3dModule;
+using System.Linq;
 
 namespace TryAR.MarkerTracking
 {
@@ -138,6 +139,29 @@ namespace TryAR.MarkerTracking
         private bool m_timeOffsetInitialized = false;
         private long m_systemToUnityTimeOffsetNs = 0;
 
+        // Add the base threshold parameter back - make it tighter since precision is important
+        [SerializeField, Tooltip("Base threshold for time difference (milliseconds)")]
+        private float m_maxAllowedTimeDifferenceMs = 5.0f;  // Tighter threshold for better precision
+
+        // Only increase to 15ms in worst case
+        [SerializeField, Tooltip("Maximum allowed time difference in worst case (milliseconds)")]
+        private float m_maxTimeDifferenceThresholdMs = 15.0f;
+        
+        // Make it harder to increase the threshold
+        [SerializeField, Tooltip("How many consecutive skipped frames before increasing threshold")]
+        private int m_frameSkipToleranceCount = 5;
+
+        // Add fields to track skipped frames and adaptive threshold
+        private int m_consecutiveFramesSkipped = 0;
+        private float m_currentTimeDifferenceThresholdMs;
+        
+        // Add a field to track the last processed frame timestamp
+        private long m_lastProcessedFrameTimestamp = 0;
+        
+        // Add frame statistics tracking
+        private int m_processedFrameCount = 0;
+        private int m_skippedFrameCount = 0;
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -186,6 +210,9 @@ namespace TryAR.MarkerTracking
                     Rotation = Quaternion.identity 
                 };
             }
+
+            // Initialize the adaptive threshold to the base value
+            m_currentTimeDifferenceThresholdMs = m_maxAllowedTimeDifferenceMs;
         }
 
         /// <summary>
@@ -198,28 +225,54 @@ namespace TryAR.MarkerTracking
             // Store current camera pose with current system time
             StoreCameraPose();
 
-            if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
+            if (m_cameraPreview != null && m_cameraPreview.HasNewFrame())
             {
+                // Get the new camera frame
                 var frame = m_cameraPreview.GetCurrentFrame();
-                if (frame.IsValid)
+                
+                // Skip if we've already processed this frame
+                if (frame.Timestamps.SensorTimestampNs == m_lastProcessedFrameTimestamp)
                 {
-                    Debug.Log($"[ArUco Tracking] Detecting marker with timestamp: {frame.Timestamps.UnixTimestampMs}, {frame.Timestamps.SensorTimestampNs}, {frame.Timestamps.SystemTimestampNs}");
-                    
-                    // Get the correct historical camera pose for this frame
-                    Transform historicalCameraTransform = GetCameraPoseForTimestamp(frame.Timestamps.SensorTimestampNs);
-                    
-                    m_arucoMarkerTracking.DetectMarker(frame.Texture);
-                    
-                    if (m_markerGameObjectDictionary.Count > 0)
+                    return;
+                }
+                
+                m_lastProcessedFrameTimestamp = frame.Timestamps.SensorTimestampNs;
+
+                if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
+                {
+                    if (frame.IsValid)
                     {
-                        // Use the historical camera transform instead of the current one
-                        m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
-                            m_markerGameObjectDictionary,
-                            historicalCameraTransform
-                        );
+                        Debug.Log($"[ArUco Tracking] Detecting marker with timestamp: {frame.Timestamps.UnixTimestampMs}, {frame.Timestamps.SensorTimestampNs}, {frame.Timestamps.SystemTimestampNs}");
                         
-                        // Clean up the temporary transform
-                        CleanupTemporaryTransform(historicalCameraTransform);
+                        // Get the closest historical camera pose for this frame
+                        Transform historicalCameraTransform = GetCameraPoseForTimestamp(frame.Timestamps.SensorTimestampNs);
+                        
+                        // Check if we have a decent time match before processing the frame
+                        long timeDiff = Math.Abs(m_cameraPoseHistory[m_cameraPoseHistoryIndex].Timestamp - frame.Timestamps.SensorTimestampNs);
+                        float timeDiffMs = timeDiff / 1000000.0f;
+                        
+                        if (timeDiffMs <= m_currentTimeDifferenceThresholdMs)
+                        {
+                            m_arucoMarkerTracking.DetectMarker(frame.Texture);
+                            
+                            if (m_markerGameObjectDictionary.Count > 0)
+                            {
+                                // Use the historical camera transform instead of the current one
+                                m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
+                                    m_markerGameObjectDictionary,
+                                    historicalCameraTransform
+                                );
+                                
+                                // Clean up the temporary transform
+                                CleanupTemporaryTransform(historicalCameraTransform);
+                            }
+                        }
+                        else
+                        {
+                            // Skip this frame as the time match is too poor
+                            Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
+                            CleanupTemporaryTransform(historicalCameraTransform);
+                        }
                     }
                 }
             }
@@ -230,6 +283,14 @@ namespace TryAR.MarkerTracking
             }
 
             UpdateHSVControls();
+
+            // Every 100 frames, log stats
+            if ((m_processedFrameCount + m_skippedFrameCount) % 100 == 0 && 
+                (m_processedFrameCount + m_skippedFrameCount) > 0)
+            {
+                float successRate = (float)m_processedFrameCount / (m_processedFrameCount + m_skippedFrameCount) * 100f;
+                Debug.Log($"[Camera Sync] Stats: Processed {m_processedFrameCount} frames, Skipped {m_skippedFrameCount} frames ({successRate:F1}% success rate)");
+            }
         }
 
         /// <summary>
@@ -699,14 +760,26 @@ namespace TryAR.MarkerTracking
             // Find the closest matching pose in our history
             int bestIndex = 0;
             long bestTimeDiff = long.MaxValue;
+            bool foundGoodMatch = false;
+
+            Debug.Log($"[Camera Sync] Checking pose match for frame {sensorTimestamp}. Available timestamps: " + 
+                      string.Join(", ", m_cameraPoseHistory.Where(p => p.Timestamp > 0).Select(p => p.Timestamp).ToArray()));
 
             for (int i = 0; i < m_cameraPoseHistorySize; i++)
             {
+                if (m_cameraPoseHistory[i].Timestamp == 0) continue; // Skip uninitialized entries
+                
                 long timeDiff = Math.Abs(m_cameraPoseHistory[i].Timestamp - sensorTimestamp);
                 if (timeDiff < bestTimeDiff)
                 {
                     bestTimeDiff = timeDiff;
                     bestIndex = i;
+                    
+                    // Check if this is within our acceptable threshold
+                    if (timeDiff / 1000000.0f <= m_currentTimeDifferenceThresholdMs)
+                    {
+                        foundGoodMatch = true;
+                    }
                 }
             }
 
@@ -717,8 +790,62 @@ namespace TryAR.MarkerTracking
             
             // Calculate and log the time difference
             float timeDiffMs = bestTimeDiff / 1000000.0f;  // Convert ns to ms
-            Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. " +
-                      $"Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
+            
+            if (foundGoodMatch)
+            {
+                Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. " +
+                          $"Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
+            }
+            else
+            {
+                // Use adaptive threshold based on consecutive skips
+                if (timeDiffMs > m_currentTimeDifferenceThresholdMs)
+                {
+                    Debug.LogWarning($"[Camera Sync] Using suboptimal camera pose match with {timeDiffMs}ms difference (exceeds {m_currentTimeDifferenceThresholdMs}ms threshold). Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
+                    
+                    // Increase consecutive skip count
+                    m_consecutiveFramesSkipped++;
+                    m_skippedFrameCount++;
+                    
+                    // If we've skipped too many frames in a row, adapt the threshold
+                    if (m_consecutiveFramesSkipped > m_frameSkipToleranceCount && 
+                        m_currentTimeDifferenceThresholdMs < m_maxTimeDifferenceThresholdMs)
+                    {
+                        // Gradually increase threshold
+                        float newThreshold = Mathf.Min(
+                            m_currentTimeDifferenceThresholdMs + 1.0f,
+                            m_maxTimeDifferenceThresholdMs);
+                            
+                        Debug.Log($"[Camera Sync] Increasing time threshold to {newThreshold}ms after {m_consecutiveFramesSkipped} consecutive skips");
+                        m_currentTimeDifferenceThresholdMs = newThreshold;
+                    }
+                    
+                    Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
+                    CleanupTemporaryTransform(tempObj.transform);
+                    return null;
+                }
+                else
+                {
+                    // Reset consecutive skip counter when we get a good match
+                    if (m_consecutiveFramesSkipped > 0)
+                    {
+                        Debug.Log($"[Camera Sync] Reset skip counter after {m_consecutiveFramesSkipped} consecutive skips");
+                        m_consecutiveFramesSkipped = 0;
+                        
+                        // Gradually decrease threshold back toward base value
+                        if (m_currentTimeDifferenceThresholdMs > m_maxAllowedTimeDifferenceMs)
+                        {
+                            m_currentTimeDifferenceThresholdMs = Mathf.Max(
+                                m_currentTimeDifferenceThresholdMs - 0.5f,
+                                m_maxAllowedTimeDifferenceMs);
+                            Debug.Log($"[Camera Sync] Decreasing time threshold to {m_currentTimeDifferenceThresholdMs}ms");
+                        }
+                    }
+                    
+                    m_processedFrameCount++;
+                    Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
+                }
+            }
 
             return tempObj.transform;
         }
@@ -749,15 +876,12 @@ namespace TryAR.MarkerTracking
         // Add a new method to calculate time offset
         private void CalculateTimeOffset(long systemTimeNs)
         {
-            // Get current Unity time in nanoseconds
             long unityTimeNs = (long)(Time.realtimeSinceStartupAsDouble * 1000000000);
-            
-            // Calculate the offset (system time - Unity time)
             m_systemToUnityTimeOffsetNs = systemTimeNs - unityTimeNs;
             m_timeOffsetInitialized = true;
             
             Debug.Log($"[Time Sync] Time offset calculated: {m_systemToUnityTimeOffsetNs/1000000.0f}ms. " +
-                      $"System: {systemTimeNs/1000000.0f}ms, Unity: {unityTimeNs/1000000.0f}ms");
+                      $"System time: {systemTimeNs/1000000.0f}ms, Unity time: {unityTimeNs/1000000.0f}ms");
         }
 
         // Add method to subscribe to the camera timestamps
@@ -777,6 +901,12 @@ namespace TryAR.MarkerTracking
             {
                 // Initialize time offset on first frame
                 CalculateTimeOffset(timestamps.SystemTimestampNs);
+                
+                // Share the time offset with the capture session for more accurate delay calculations
+                if (m_cameraPreview != null)
+                {
+                    m_cameraPreview.SetCaptureSessionTimeOffset(m_systemToUnityTimeOffsetNs);
+                }
             }
         }
     }

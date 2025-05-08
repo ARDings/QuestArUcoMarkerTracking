@@ -84,6 +84,9 @@ public class SimpleCameraPreview : MonoBehaviour
     // Add this event for timestamp notifications
     public event Action<FrameTimestamps> OnFrameTimestampsUpdated;
 
+    // Add a field to track if we have a new frame
+    private bool _hasNewFrame = false;
+
     protected void Start()
     {
         // Deaktiviere UI-Elemente, wenn Preview nicht benötigt wird
@@ -311,5 +314,30 @@ public class SimpleCameraPreview : MonoBehaviour
                   $"\n  Sensor: {_currentFrameTimestamps.SensorTimestampNs}ns" +
                   $"\n  System: {_currentFrameTimestamps.SystemTimestampNs}ns" +
                   $"\n  Unix: {_currentFrameTimestamps.UnixTimestampMs}ms");
+
+        // Mark that we have a new frame
+        _hasNewFrame = true;
+    }
+
+    // Method to forward time offset to capture sessions
+    public void SetCaptureSessionTimeOffset(long offset)
+    {
+        if (_leftCaptureSession != null)
+        {
+            _leftCaptureSession.CaptureSession.SetTimeOffset(offset);
+        }
+        
+        if (_rightCaptureSession != null)
+        {
+            _rightCaptureSession.CaptureSession.SetTimeOffset(offset);
+        }
+    }
+
+    // Add a method to check for new frames
+    public bool HasNewFrame()
+    {
+        bool result = _hasNewFrame;
+        _hasNewFrame = false; // Reset after being checked
+        return result;
     }
 } 
