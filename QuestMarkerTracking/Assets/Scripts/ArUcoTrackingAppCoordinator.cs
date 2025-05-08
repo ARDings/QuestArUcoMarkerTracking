@@ -172,6 +172,14 @@ namespace TryAR.MarkerTracking
         [SerializeField, Tooltip("Size of each marker in millimeters")]
         private float m_markerSizeInMm = 50f;
 
+        // New fields for pose averaging
+        [Header("Pose Averaging")]
+        [SerializeField, Tooltip("Number of high-quality poses to collect and average")]
+        private int m_posesToCollect = 2;
+        private Dictionary<int, List<Pose>> m_collectedPoses = new Dictionary<int, List<Pose>>();
+        private Dictionary<int, Pose> m_averagedPoses = new Dictionary<int, Pose>();
+        private bool m_hasSufficientPoses = false;
+
         // Track detected markers in the current frame
         private HashSet<int> m_detectedMarkersInCurrentFrame = new HashSet<int>();
         private bool m_allGridMarkersDetected = false;
@@ -331,18 +339,18 @@ namespace TryAR.MarkerTracking
                                     bool isHighQualityDetection = (
                                                                    qualityClass == ArUcoMarkerTracking.DetectionQualityClass.Excellent);
                                     
-                                    // Make marker objects visible when all markers are detected with sufficient quality
-                                    
-                                    
                                     // Only process pose estimation if detection quality is sufficient
                                     if (isHighQualityDetection)
                                     {
-                                        SetMarkerObjectsVisibility(isHighQualityDetection);
-                                        // Use the historical camera transform instead of the current one
-                                        m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
-                                            m_markerGameObjectDictionary,
-                                            historicalCameraTransform
-                                        );
+                                        // Modified: Collect poses instead of directly applying them
+                                        CollectMarkerPoses(historicalCameraTransform);
+                                        
+                                        // Apply the averaged poses if we have enough
+                                        if (m_hasSufficientPoses)
+                                        {
+                                            ApplyAveragedPoses();
+                                            SetMarkerObjectsVisibility(true);
+                                        }
                                     }
                                     else
                                     {
@@ -1098,5 +1106,178 @@ namespace TryAR.MarkerTracking
                 }
             }
         }
+
+        /// <summary>
+        /// Collects pose information from the markers in the current frame
+        /// </summary>
+        private void CollectMarkerPoses(Transform cameraTransform)
+        {
+            // Create a temporary dictionary to store marker objects' original transforms
+            Dictionary<int, (Vector3 position, Quaternion rotation)> originalTransforms = new Dictionary<int, (Vector3, Quaternion)>();
+            
+            // Store original transforms before estimation
+            foreach (var entry in m_markerGameObjectDictionary)
+            {
+                int markerId = entry.Key;
+                GameObject markerObject = entry.Value;
+                if (markerObject != null)
+                {
+                    originalTransforms[markerId] = (markerObject.transform.position, markerObject.transform.rotation);
+                }
+            }
+            
+            // Let ArUcoMarkerTracking estimate poses directly (this will modify the transforms)
+            m_arucoMarkerTracking.EstimatePoseCanonicalMarker(m_markerGameObjectDictionary, cameraTransform);
+            
+            // Capture the new poses and restore original transforms
+            foreach (var entry in m_markerGameObjectDictionary)
+            {
+                int markerId = entry.Key;
+                GameObject markerObject = entry.Value;
+                
+                if (markerObject != null)
+                {
+                    // Capture the pose that was just applied
+                    Pose newPose = new Pose(markerObject.transform.position, markerObject.transform.rotation);
+                    
+                    // Initialize the list for this marker if needed
+                    if (!m_collectedPoses.ContainsKey(markerId))
+                    {
+                        m_collectedPoses[markerId] = new List<Pose>();
+                    }
+                    
+                    // Add the pose to our collection
+                    m_collectedPoses[markerId].Add(newPose);
+                    
+                    // Maintain only the desired number of poses
+                    if (m_collectedPoses[markerId].Count > m_posesToCollect)
+                    {
+                        m_collectedPoses[markerId].RemoveAt(0);
+                    }
+                    
+                    Debug.Log($"[Pose Collection] Collected pose for marker {markerId}. Total: {m_collectedPoses[markerId].Count}/{m_posesToCollect}");
+                    
+                    // Restore original transform until we're ready to apply averaged poses
+                    if (originalTransforms.TryGetValue(markerId, out var originalTransform))
+                    {
+                        markerObject.transform.position = originalTransform.position;
+                        markerObject.transform.rotation = originalTransform.rotation;
+                    }
+                }
+            }
+            
+            // Check if we have collected enough poses for all markers
+            CheckForSufficientPoses();
+        }
+
+        /// <summary>
+        /// Checks if we have collected enough poses for averaging
+        /// </summary>
+        private void CheckForSufficientPoses()
+        {
+            bool hasEnough = true;
+            
+            // Check if all markers have enough poses
+            foreach (int markerId in m_markerGameObjectDictionary.Keys)
+            {
+                if (!m_collectedPoses.ContainsKey(markerId) || m_collectedPoses[markerId].Count < m_posesToCollect)
+                {
+                    hasEnough = false;
+                    break;
+                }
+            }
+            
+            // Only recalculate if we just reached enough poses or if we've lost some
+            if (hasEnough != m_hasSufficientPoses)
+            {
+                m_hasSufficientPoses = hasEnough;
+                
+                if (m_hasSufficientPoses)
+                {
+                    CalculateAveragedPoses();
+                    Debug.Log("[Pose Averaging] Sufficient poses collected. Calculated averaged poses.");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Calculates the averaged pose for each marker
+        /// </summary>
+        private void CalculateAveragedPoses()
+        {
+            foreach (var entry in m_collectedPoses)
+            {
+                int markerId = entry.Key;
+                List<Pose> poses = entry.Value;
+                
+                if (poses.Count >= m_posesToCollect)
+                {
+                    // Average positions
+                    Vector3 avgPosition = Vector3.zero;
+                    foreach (var pose in poses)
+                    {
+                        avgPosition += pose.position;
+                    }
+                    avgPosition /= poses.Count;
+                    
+                    // Average rotations
+                    Quaternion avgRotation = AverageQuaternions(poses.Select(p => p.rotation).ToList());
+                    
+                    // Store the averaged pose
+                    m_averagedPoses[markerId] = new Pose(avgPosition, avgRotation);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Applies the averaged poses to the marker GameObjects
+        /// </summary>
+        private void ApplyAveragedPoses()
+        {
+            foreach (var entry in m_averagedPoses)
+            {
+                int markerId = entry.Key;
+                Pose pose = entry.Value;
+                
+                // Apply the pose to the GameObject if it exists in our dictionary
+                if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
+                {
+                    markerObject.transform.position = pose.position;
+                    markerObject.transform.rotation = pose.rotation;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Average multiple quaternions
+        /// </summary>
+        private Quaternion AverageQuaternions(List<Quaternion> quaternions)
+        {
+            if (quaternions.Count == 0)
+                return Quaternion.identity;
+            
+            if (quaternions.Count == 1)
+                return quaternions[0];
+            
+            // Use a simple averaging approach for just two quaternions
+            // This works well for quaternions that are close together
+            Quaternion result = quaternions[0];
+            
+            for (int i = 1; i < quaternions.Count; i++)
+            {
+                // Handle possible opposite-facing quaternions
+                if (Quaternion.Dot(result, quaternions[i]) < 0)
+                {
+                    result = Quaternion.Slerp(result, Quaternion.Inverse(quaternions[i]), 0.5f);
+                }
+                else
+                {
+                    result = Quaternion.Slerp(result, quaternions[i], 0.5f);
+                }
+            }
+            
+            return result;
+        }
     }
 }
+
