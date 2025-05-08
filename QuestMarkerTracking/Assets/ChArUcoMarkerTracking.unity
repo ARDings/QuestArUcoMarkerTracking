@@ -1661,15 +1661,20 @@ MonoBehaviour:
   m_visualScaleFactor: 1
   m_processingDivider: 1
   m_cameraPoseHistorySize: 600
-  m_maxAllowedTimeDifferenceMs: 2
-  m_maxTimeDifferenceThresholdMs: 3
+  m_maxAllowedTimeDifferenceMs: 10
+  m_maxTimeDifferenceThresholdMs: 15
   m_frameSkipToleranceCount: 5000
   m_requireAllGridBoardMarkers: 1
   m_expectedMarkerCount: 6
   m_gridBoardMarkerIds: 000000000100000002000000030000000400000005000000
   m_markerSizeInMm: 50
-  m_manualTimeOffsetMs: 10
+  m_manualTimeOffsetMs: 40
   m_timeOffsetAdjustSpeed: 1
+  m_qualityIndicator: {fileID: 0}
+  m_excellentQualityMaterial: {fileID: 0}
+  m_goodQualityMaterial: {fileID: 0}
+  m_moderateQualityMaterial: {fileID: 0}
+  m_poorQualityMaterial: {fileID: 0}
 --- !u!1 &340539805
 GameObject:
   m_ObjectHideFlags: 0

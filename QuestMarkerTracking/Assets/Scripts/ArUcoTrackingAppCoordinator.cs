@@ -183,6 +183,13 @@ namespace TryAR.MarkerTracking
         private float m_timeOffsetAdjustSpeed = 1.0f;
         private bool m_isAdjustingTimeOffset = false;
 
+        [Header("Quality Indicator")]
+        [SerializeField] private GameObject m_qualityIndicator;
+        [SerializeField] private Material m_excellentQualityMaterial;
+        [SerializeField] private Material m_goodQualityMaterial;
+        [SerializeField] private Material m_moderateQualityMaterial;
+        [SerializeField] private Material m_poorQualityMaterial;
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -299,19 +306,46 @@ namespace TryAR.MarkerTracking
                                 
                                 if (m_allGridMarkersDetected)
                                 {
-                                    Debug.Log($"[Grid Board] All {m_expectedMarkerCount} markers detected in a single frame!");
+                                    // Get marker detection quality metrics
+                                    var detectionMetrics = m_arucoMarkerTracking.GetDetectionQualityMetrics();
                                     
-                                    // Make marker objects visible when all markers are detected
-                                    SetMarkerObjectsVisibility(true);
+                                    // Evaluate the overall quality of the detection
+                                    var qualityClass = m_arucoMarkerTracking.EvaluateDetectionQuality(detectionMetrics);
                                     
-                                    // Only process pose estimation if all markers are detected
-                                    if (m_markerGameObjectDictionary.Count > 0)
+                                    // Log detection quality information
+                                    string markerQualityInfo = $"[Grid Board] Marker Detection Quality: {qualityClass}\n";
+                                    foreach (var markerId in m_gridBoardMarkerIds)
+                                    {
+                                        if (detectionMetrics.ContainsKey(markerId))
+                                        {
+                                            var quality = detectionMetrics[markerId];
+                                            markerQualityInfo += $"  - Marker {markerId}: Corner precision: {quality.CornerPrecision:F3}, " +
+                                                                $"Perimeter: {quality.Perimeter:F1} pixels, " +
+                                                                $"Area: {quality.Area:F1} pixels²\n";
+                                        }
+                                    }
+                                    
+                                    Debug.Log($"[Grid Board] All {m_expectedMarkerCount} markers detected in a single frame!\n{markerQualityInfo}");
+                                    
+                                    // Only use high-quality detections for pose estimation
+                                    bool isHighQualityDetection = (
+                                                                   qualityClass == ArUcoMarkerTracking.DetectionQualityClass.Excellent);
+                                    
+                                    // Make marker objects visible when all markers are detected with sufficient quality
+                                    SetMarkerObjectsVisibility(isHighQualityDetection);
+                                    
+                                    // Only process pose estimation if detection quality is sufficient
+                                    if (isHighQualityDetection)
                                     {
                                         // Use the historical camera transform instead of the current one
                                         m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
                                             m_markerGameObjectDictionary,
                                             historicalCameraTransform
                                         );
+                                    }
+                                    else
+                                    {
+                                        Debug.Log("[Grid Board] Detection quality insufficient. Skipping pose estimation.");
                                     }
                                 }
                                 else
@@ -1030,6 +1064,36 @@ namespace TryAR.MarkerTracking
                 if (m_cameraPreview != null)
                 {
                     m_cameraPreview.SetCaptureSessionTimeOffset(m_systemToUnityTimeOffsetNs);
+                }
+            }
+        }
+
+        private void UpdateQualityIndicator(ArUcoMarkerTracking.DetectionQualityClass quality)
+        {
+            if (m_qualityIndicator == null)
+                return;
+        
+            // Show quality indicator
+            m_qualityIndicator.SetActive(m_allGridMarkersDetected);
+        
+            // Update color based on quality
+            MeshRenderer renderer = m_qualityIndicator.GetComponent<MeshRenderer>();
+            if (renderer != null)
+            {
+                switch (quality)
+                {
+                    case ArUcoMarkerTracking.DetectionQualityClass.Excellent:
+                        renderer.material = m_excellentQualityMaterial;
+                        break;
+                    case ArUcoMarkerTracking.DetectionQualityClass.Good:
+                        renderer.material = m_goodQualityMaterial;
+                        break;
+                    case ArUcoMarkerTracking.DetectionQualityClass.Moderate:
+                        renderer.material = m_moderateQualityMaterial;
+                        break;
+                    case ArUcoMarkerTracking.DetectionQualityClass.Poor:
+                        renderer.material = m_poorQualityMaterial;
+                        break;
                 }
             }
         }

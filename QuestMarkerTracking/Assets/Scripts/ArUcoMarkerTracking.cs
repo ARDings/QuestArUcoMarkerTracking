@@ -419,5 +419,151 @@ namespace TryAR.MarkerTracking
             
             return detectedIds;
         }
+
+        /// <summary>
+        /// Represents the quality metrics for a detected marker
+        /// </summary>
+        public class MarkerQualityMetrics
+        {
+            public float CornerPrecision { get; set; } = 0f;  // Higher is better
+            public float Perimeter { get; set; } = 0f;        // In pixels
+            public float Area { get; set; } = 0f;             // In pixels²
+            public float DetectionConfidence { get; set; } = 0f;  // 0-1 range
+        }
+
+        /// <summary>
+        /// Returns detection quality metrics for all markers detected in the last frame
+        /// </summary>
+        /// <returns>Dictionary mapping marker IDs to quality metrics</returns>
+        public Dictionary<int, MarkerQualityMetrics> GetDetectionQualityMetrics()
+        {
+            Dictionary<int, MarkerQualityMetrics> metrics = new Dictionary<int, MarkerQualityMetrics>();
+            
+            if (_detectedMarkerIds == null || _detectedMarkerCorners == null || 
+                _detectedMarkerIds.rows() == 0 || _detectedMarkerCorners.Count == 0)
+            {
+                return metrics;
+            }
+            
+            // Calculate quality metrics for each detected marker
+            for (int i = 0; i < _detectedMarkerIds.rows(); i++)
+            {
+                int markerId = (int)_detectedMarkerIds.get(i, 0)[0];
+                Mat corners = _detectedMarkerCorners[i];
+                
+                MarkerQualityMetrics quality = new MarkerQualityMetrics();
+                
+                // Calculate perimeter
+                double perimeter = 0;
+                Point[] cornerPoints = new Point[4];
+                for (int j = 0; j < 4; j++)
+                {
+                    cornerPoints[j] = new Point(corners.get(0, j)[0], corners.get(0, j)[1]);
+                }
+                
+                for (int j = 0; j < 4; j++)
+                {
+                    int nextJ = (j + 1) % 4;
+                    double dx = cornerPoints[j].x - cornerPoints[nextJ].x;
+                    double dy = cornerPoints[j].y - cornerPoints[nextJ].y;
+                    perimeter += Math.Sqrt(dx * dx + dy * dy);
+                }
+                quality.Perimeter = (float)perimeter;
+                
+                // Calculate area using the shoelace formula
+                double area = 0;
+                for (int j = 0; j < 4; j++)
+                {
+                    int nextJ = (j + 1) % 4;
+                    area += cornerPoints[j].x * cornerPoints[nextJ].y;
+                    area -= cornerPoints[j].y * cornerPoints[nextJ].x;
+                }
+                quality.Area = (float)Math.Abs(area / 2);
+                
+                // Estimate corner precision by calculating variance of corner positions
+                // A rough approximation - low variance in straight lines indicates better precision
+                double cornerVariance = 0;
+                for (int j = 0; j < 4; j++)
+                {
+                    int nextJ = (j + 1) % 4;
+                    int prevJ = (j + 3) % 4;
+                    
+                    // Calculate expected position if corners were perfectly aligned
+                    double expectedX = (cornerPoints[nextJ].x + cornerPoints[prevJ].x) / 2;
+                    double expectedY = (cornerPoints[nextJ].y + cornerPoints[prevJ].y) / 2;
+                    
+                    // Calculate difference from actual position
+                    double diffX = cornerPoints[j].x - expectedX;
+                    double diffY = cornerPoints[j].y - expectedY;
+                    
+                    cornerVariance += diffX * diffX + diffY * diffY;
+                }
+                
+                // Convert variance to a precision metric (1/(1+variance))
+                quality.CornerPrecision = (float)(1.0 / (1.0 + cornerVariance / 4));
+                
+                // For now, use a placeholder for detection confidence
+                // In the future, this could be based on actual confidence from the detector
+                quality.DetectionConfidence = 1.0f;
+                
+                metrics[markerId] = quality;
+            }
+            
+            return metrics;
+        }
+
+        /// <summary>
+        /// Evaluates the quality of marker detection
+        /// </summary>
+        /// <param name="metrics">Dictionary of marker quality metrics</param>
+        /// <returns>Classification of detection quality</returns>
+        public DetectionQualityClass EvaluateDetectionQuality(Dictionary<int, MarkerQualityMetrics> metrics)
+        {
+            // Calculate average metrics
+            float avgPrecision = 0f;
+            float avgArea = 0f;
+            float avgPerimeter = 0f;
+            int count = 0;
+            
+            foreach (var metric in metrics.Values)
+            {
+                avgPrecision += metric.CornerPrecision;
+                avgArea += metric.Area;
+                avgPerimeter += metric.Perimeter;
+                count++;
+            }
+            
+            if (count == 0) return DetectionQualityClass.Poor;
+            
+            avgPrecision /= count;
+            avgArea /= count;
+            avgPerimeter /= count;
+            
+            // Define thresholds based on observed data
+            // Good quality: High area (>1000 px²) and good precision (<0.002)
+            if (avgArea > 1000f && avgPrecision < 0.001f)
+                return DetectionQualityClass.Excellent;
+            
+            // Medium quality: Decent area (>600 px²) and reasonable precision (<0.003)
+            if (avgArea > 600f && avgPrecision < 0.003f)
+                return DetectionQualityClass.Good;
+            
+            // Poor quality: Small area or poor precision
+            if (avgArea < 400f || avgPrecision > 0.003f)
+                return DetectionQualityClass.Poor;
+            
+            return DetectionQualityClass.Moderate;
+        }
+
+        /// <summary>
+        /// Classification of detection quality
+        /// </summary>
+        public enum DetectionQualityClass
+        {
+            Poor,
+            Moderate,
+            Good,
+            Excellent
+        }
     }
 }
