@@ -141,11 +141,11 @@ namespace TryAR.MarkerTracking
 
         // Add the base threshold parameter back - make it tighter since precision is important
         [SerializeField, Tooltip("Base threshold for time difference (milliseconds)")]
-        private float m_maxAllowedTimeDifferenceMs = 5.0f;  // Tighter threshold for better precision
+        private float m_maxAllowedTimeDifferenceMs = 10.0f;  // Tighter threshold for better precision
 
         // Only increase to 15ms in worst case
         [SerializeField, Tooltip("Maximum allowed time difference in worst case (milliseconds)")]
-        private float m_maxTimeDifferenceThresholdMs = 15.0f;
+        private float m_maxTimeDifferenceThresholdMs = 30.0f;
         
         // Make it harder to increase the threshold
         [SerializeField, Tooltip("How many consecutive skipped frames before increasing threshold")]

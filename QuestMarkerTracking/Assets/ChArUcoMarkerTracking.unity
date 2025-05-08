@@ -1660,10 +1660,10 @@ MonoBehaviour:
   m_showOffsetDebug: 0
   m_visualScaleFactor: 1
   m_processingDivider: 1
-  m_cameraPoseHistorySize: 60
-  m_maxAllowedTimeDifferenceMs: 10
-  m_maxTimeDifferenceThresholdMs: 15
-  m_frameSkipToleranceCount: 5
+  m_cameraPoseHistorySize: 600
+  m_maxAllowedTimeDifferenceMs: 1
+  m_maxTimeDifferenceThresholdMs: 2
+  m_frameSkipToleranceCount: 5000
 --- !u!1 &340539805
 GameObject:
   m_ObjectHideFlags: 0
@@ -3398,8 +3398,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 28913ac5693f7e544baeeca1d0e9a789, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  _dictionaryId: 0
-  _markerLength: 0.25
+  _dictionaryId: 12
+  _markerLength: 0.2
   _poseFilterCoefficient: 0
   _divideNumber: 1
 --- !u!4 &546589276
