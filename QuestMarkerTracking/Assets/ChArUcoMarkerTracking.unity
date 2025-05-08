@@ -1661,8 +1661,8 @@ MonoBehaviour:
   m_visualScaleFactor: 1
   m_processingDivider: 1
   m_cameraPoseHistorySize: 600
-  m_maxAllowedTimeDifferenceMs: 1
-  m_maxTimeDifferenceThresholdMs: 2
+  m_maxAllowedTimeDifferenceMs: 0.3
+  m_maxTimeDifferenceThresholdMs: 0.4
   m_frameSkipToleranceCount: 5000
 --- !u!1 &340539805
 GameObject:
@@ -3399,7 +3399,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _dictionaryId: 12
-  _markerLength: 0.2
+  _markerLength: 0.15
   _poseFilterCoefficient: 0
   _divideNumber: 1
 --- !u!4 &546589276
@@ -7489,7 +7489,7 @@ Transform:
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
   m_LocalPosition: {x: 0, y: 0, z: 0}
-  m_LocalScale: {x: 0.1, y: 0.1, z: 0.1}
+  m_LocalScale: {x: 0.15, y: 0.01, z: 0.15}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 905551542}
@@ -7517,7 +7517,7 @@ MeshRenderer:
   m_RenderingLayerMask: 1
   m_RendererPriority: 0
   m_Materials:
-  - {fileID: 2100000, guid: bf8dedff7c178e5408df43712ec85ded, type: 2}
+  - {fileID: 2100000, guid: b00ab3a9ae4d7504e9314d6642c8fcb4, type: 2}
   m_StaticBatchInfo:
     firstSubMesh: 0
     subMeshCount: 0

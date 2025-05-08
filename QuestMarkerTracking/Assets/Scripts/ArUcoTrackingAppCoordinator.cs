@@ -413,7 +413,7 @@ namespace TryAR.MarkerTracking
                 {
                     if (m_ballVisualization != null)
                     {
-                        // Apply offset
+                        // Apply offset 
                         Vector3 finalPosition = result.WorldPosition + m_ballOffset;
                         
                         // Smooth position
@@ -846,9 +846,38 @@ namespace TryAR.MarkerTracking
                     Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
                 }
             }
+            
+            ApplyRandomColors(tempObj);
 
             return tempObj.transform;
         }
+
+            void ApplyRandomColors(GameObject parent)
+    {
+        Renderer[] renderers = parent.GetComponentsInChildren<Renderer>();
+
+        foreach (Renderer renderer in renderers)
+        {
+            // Instanz des Materials erzeugen, um nur dieses Objekt zu beeinflussen
+            Material mat = renderer.material;
+
+            // Nur ändern, wenn das Material eine _Color-Property besitzt
+            if (mat.HasProperty("_Color"))
+            {
+                Color randomColor = new Color(
+                    UnityEngine.Random.value,
+                    UnityEngine.Random.value,
+                    UnityEngine.Random.value
+                );
+
+                mat.SetColor("_Color", randomColor);
+            }
+            else
+            {
+                Debug.LogWarning($"{renderer.name} hat keine _Color-Property im Material.");
+            }
+        }
+    }
 
         /// <summary>
         /// Cleans up the temporary transform created for historical camera pose

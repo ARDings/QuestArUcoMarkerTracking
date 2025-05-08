@@ -147,7 +147,10 @@ public class SimpleCameraPreview : MonoBehaviour
 
         // Wähle eine niedrigere Auflösung für bessere Performance
         var leftSupportedResolutions = _leftCameraInfo.SupportedResolutions;
-        var leftSelectedResolution = leftSupportedResolutions[0]; // Use highest resolution (first in list)
+        var leftSelectedResolution = leftSupportedResolutions.Length > 2 ? 
+                                    leftSupportedResolutions[leftSupportedResolutions.Length - 3] : 
+                                    leftSupportedResolutions[0];
+        
         Debug.Log($"Selected left camera resolution: {leftSelectedResolution.width}x{leftSelectedResolution.height}");
         
         _leftCaptureSession = _leftCameraDevice.CreateContinuousCaptureSession(leftSelectedResolution);
