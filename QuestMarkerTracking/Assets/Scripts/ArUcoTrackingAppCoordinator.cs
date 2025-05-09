@@ -1258,9 +1258,27 @@ namespace TryAR.MarkerTracking
                 // Check if we have a previous average to blend with
                 if (m_previousAveragedPoses.TryGetValue(markerId, out Pose previousAvgPose))
                 {
-                    // Blend the new and previous averaged poses
+                    // Blend the new and previous averaged positions
                     Vector3 blendedPosition = Vector3.Lerp(newAvgPose.position, previousAvgPose.position, m_previousAverageWeight);
-                    Quaternion blendedRotation = Quaternion.Slerp(newAvgPose.rotation, previousAvgPose.rotation, m_previousAverageWeight);
+                    
+                    // Nur die Y-Achsen-Rotation extrahieren und mischen
+                    float newYRotation = newAvgPose.rotation.eulerAngles.y;
+                    float prevYRotation = previousAvgPose.rotation.eulerAngles.y;
+                    
+                    // Handhabung des 360-Grad-Übergangs (z.B. 350 -> 10 Grad)
+                    if (Mathf.Abs(newYRotation - prevYRotation) > 180f)
+                    {
+                        if (newYRotation > prevYRotation)
+                            prevYRotation += 360f;
+                        else
+                            newYRotation += 360f;
+                    }
+                    
+                    // Interpoliere die Y-Rotation
+                    float blendedYRotation = Mathf.Lerp(newYRotation, prevYRotation, m_previousAverageWeight) % 360f;
+                    
+                    // Erstelle eine neue Rotation, die nur den Y-Wert verändert
+                    Quaternion blendedRotation = Quaternion.Euler(0, blendedYRotation, 0);
                     
                     // Create the final blended pose
                     Pose blendedPose = new Pose(blendedPosition, blendedRotation);
@@ -1271,12 +1289,20 @@ namespace TryAR.MarkerTracking
                     // Apply the blended pose to the GameObject if it exists in our dictionary
                     if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
                     {
-                        // Prüfen, ob sich die Position wirklich geändert hat
+                        // Prüfen, ob sich die Position oder Y-Rotation wirklich geändert hat
+                        float currentYRotation = markerObject.transform.rotation.eulerAngles.y;
+                        float rotationDifference = Mathf.Abs(Mathf.DeltaAngle(currentYRotation, blendedYRotation));
+                        
                         if (Vector3.Distance(markerObject.transform.position, blendedPose.position) > 0.0001f ||
-                            Quaternion.Angle(markerObject.transform.rotation, blendedPose.rotation) > 0.01f)
+                            rotationDifference > 0.1f)
                         {
+                            // Neue Position anwenden
                             markerObject.transform.position = blendedPose.position;
-                            markerObject.transform.rotation = blendedPose.rotation;
+                            
+                            // Aktuelle X und Z Rotation beibehalten, nur Y ändern
+                            Vector3 currentRotation = markerObject.transform.rotation.eulerAngles;
+                            markerObject.transform.rotation = Quaternion.Euler(currentRotation.x, blendedYRotation, currentRotation.z);
+                            
                             positionChanged = true;
                         }
                     }
@@ -1284,13 +1310,23 @@ namespace TryAR.MarkerTracking
                 else
                 {
                     // No previous average exists yet, just use the new average
-                    m_previousAveragedPoses[markerId] = newAvgPose;
+                    // Nur Y-Rotation beibehalten
+                    Vector3 rotationAngles = newAvgPose.rotation.eulerAngles;
+                    Quaternion yOnlyRotation = Quaternion.Euler(0, rotationAngles.y, 0);
+                    
+                    Pose yRotationOnlyPose = new Pose(newAvgPose.position, yOnlyRotation);
+                    m_previousAveragedPoses[markerId] = yRotationOnlyPose;
                     
                     // Apply the pose to the GameObject if it exists in our dictionary
                     if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
                     {
+                        // Neue Position anwenden
                         markerObject.transform.position = newAvgPose.position;
-                        markerObject.transform.rotation = newAvgPose.rotation;
+                        
+                        // Aktuelle X und Z Rotation beibehalten, nur Y ändern
+                        Vector3 currentRotation = markerObject.transform.rotation.eulerAngles;
+                        markerObject.transform.rotation = Quaternion.Euler(currentRotation.x, rotationAngles.y, currentRotation.z);
+                        
                         positionChanged = true;
                     }
                 }
