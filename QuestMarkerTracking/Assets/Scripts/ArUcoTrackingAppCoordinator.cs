@@ -175,10 +175,15 @@ namespace TryAR.MarkerTracking
         // New fields for pose averaging
         [Header("Pose Averaging")]
         [SerializeField, Tooltip("Number of high-quality poses to collect and average")]
-        private int m_posesToCollect = 2;
+        private int m_posesToCollect = 20;
         private Dictionary<int, List<Pose>> m_collectedPoses = new Dictionary<int, List<Pose>>();
         private Dictionary<int, Pose> m_averagedPoses = new Dictionary<int, Pose>();
+        private Dictionary<int, Pose> m_previousAveragedPoses = new Dictionary<int, Pose>();
         private bool m_hasSufficientPoses = false;
+        [SerializeField, Range(0, 1), Tooltip("Weight of previous average (0=only new poses, 1=only old poses)")]
+        private float m_previousAverageWeight = 0.3f;
+        [SerializeField, Tooltip("Reset pose collection after applying averaged poses")]
+        private bool m_resetCollectionAfterApplying = true;
 
         // Track detected markers in the current frame
         private HashSet<int> m_detectedMarkersInCurrentFrame = new HashSet<int>();
@@ -197,6 +202,12 @@ namespace TryAR.MarkerTracking
         [SerializeField] private Material m_goodQualityMaterial;
         [SerializeField] private Material m_moderateQualityMaterial;
         [SerializeField] private Material m_poorQualityMaterial;
+
+        [Header("Debug")]
+        [SerializeField] private AudioClip m_positionUpdateSound;
+        [SerializeField] private AudioSource m_audioSource;
+        [SerializeField] private bool m_unparentMarkersOnStart = true;
+        [SerializeField] private bool m_freezePhysicsOnMarkers = true;
 
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
@@ -249,6 +260,16 @@ namespace TryAR.MarkerTracking
 
             // Initialize the adaptive threshold to the base value
             m_currentTimeDifferenceThresholdMs = m_maxAllowedTimeDifferenceMs;
+
+            if (m_unparentMarkersOnStart)
+            {
+                UnparentMarkerObjects();
+            }
+            
+            if (m_freezePhysicsOnMarkers)
+            {
+                DisablePhysicsOnMarkerObjects();
+            }
         }
 
         /// <summary>
@@ -342,10 +363,10 @@ namespace TryAR.MarkerTracking
                                     // Only process pose estimation if detection quality is sufficient
                                     if (isHighQualityDetection)
                                     {
-                                        // Modified: Collect poses instead of directly applying them
-                                        CollectMarkerPoses(historicalCameraTransform);
+                                        // WICHTIG: Hier Pose-Daten nur sammeln, nicht anwenden
+                                        CollectPosesWithoutAffectingTransforms(historicalCameraTransform);
                                         
-                                        // Apply the averaged poses if we have enough
+                                        // Apply the averaged poses ONLY if we have enough poses
                                         if (m_hasSufficientPoses)
                                         {
                                             ApplyAveragedPoses();
@@ -360,20 +381,22 @@ namespace TryAR.MarkerTracking
                                 else
                                 {
                                     Debug.Log($"[Grid Board] Only {detectedMarkers.Count}/{m_expectedMarkerCount} markers detected. Skipping pose estimation.");
-                                    // Hide or reset marker visualizations when not all markers are detected
-                                    //SetMarkerObjectsVisibility(false);
                                 }
                             }
                             else
                             {
-                                // Original behavior - process any detected markers
-                                if (m_markerGameObjectDictionary.Count > 0)
-                                {
-                                    m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
-                                        m_markerGameObjectDictionary,
-                                        historicalCameraTransform
-                                    );
-                                }
+                                // WICHTIG: Im "else"-Zweig (Original-Verhalten) dürfen wir NICHT die Position ändern!
+                                // Deaktiviert: keine direkte Manipulation der Objekte durch ArUco-Tracking
+                                // if (m_markerGameObjectDictionary.Count > 0)
+                                // {
+                                //     m_arucoMarkerTracking.EstimatePoseCanonicalMarker(
+                                //         m_markerGameObjectDictionary,
+                                //         historicalCameraTransform
+                                //     );
+                                // }
+                                
+                                // Stattdessen nur Posen sammeln ohne die Objekte zu beeinflussen
+                                CollectPosesWithoutAffectingTransforms(historicalCameraTransform);
                             }
                             
                             // Clean up the temporary transform
@@ -1108,65 +1131,51 @@ namespace TryAR.MarkerTracking
         }
 
         /// <summary>
-        /// Collects pose information from the markers in the current frame
+        /// Collects poses without affecting marker object transforms
         /// </summary>
-        private void CollectMarkerPoses(Transform cameraTransform)
+        private void CollectPosesWithoutAffectingTransforms(Transform cameraTransform)
         {
-            // Create a temporary dictionary to store marker objects' original transforms
-            Dictionary<int, (Vector3 position, Quaternion rotation)> originalTransforms = new Dictionary<int, (Vector3, Quaternion)>();
+            // Erstelle temporäre GameObjects für ArUco-Berechnungen
+            Dictionary<int, GameObject> tempObjects = new Dictionary<int, GameObject>();
             
-            // Store original transforms before estimation
+            // Für jeden Marker ein temporäres Objekt erstellen
             foreach (var entry in m_markerGameObjectDictionary)
             {
                 int markerId = entry.Key;
-                GameObject markerObject = entry.Value;
-                if (markerObject != null)
-                {
-                    originalTransforms[markerId] = (markerObject.transform.position, markerObject.transform.rotation);
-                }
+                GameObject tempObj = new GameObject($"TempMarker_{markerId}");
+                tempObjects[markerId] = tempObj;
             }
             
-            // Let ArUcoMarkerTracking estimate poses directly (this will modify the transforms)
-            m_arucoMarkerTracking.EstimatePoseCanonicalMarker(m_markerGameObjectDictionary, cameraTransform);
+            // Pose-Estimation auf temporären Objekten durchführen
+            m_arucoMarkerTracking.EstimatePoseCanonicalMarker(tempObjects, cameraTransform);
             
-            // Capture the new poses and restore original transforms
-            foreach (var entry in m_markerGameObjectDictionary)
+            // Posen sammeln
+            foreach (var entry in tempObjects)
             {
                 int markerId = entry.Key;
-                GameObject markerObject = entry.Value;
+                GameObject tempObj = entry.Value;
                 
-                if (markerObject != null)
+                // Pose erfassen
+                Pose newPose = new Pose(tempObj.transform.position, tempObj.transform.rotation);
+                
+                // Liste initialisieren falls nötig
+                if (!m_collectedPoses.ContainsKey(markerId))
                 {
-                    // Capture the pose that was just applied
-                    Pose newPose = new Pose(markerObject.transform.position, markerObject.transform.rotation);
-                    
-                    // Initialize the list for this marker if needed
-                    if (!m_collectedPoses.ContainsKey(markerId))
-                    {
-                        m_collectedPoses[markerId] = new List<Pose>();
-                    }
-                    
-                    // Add the pose to our collection
-                    m_collectedPoses[markerId].Add(newPose);
-                    
-                    // Maintain only the desired number of poses
-                    if (m_collectedPoses[markerId].Count > m_posesToCollect)
-                    {
-                        m_collectedPoses[markerId].RemoveAt(0);
-                    }
-                    
-                    Debug.Log($"[Pose Collection] Collected pose for marker {markerId}. Total: {m_collectedPoses[markerId].Count}/{m_posesToCollect}");
-                    
-                    // Restore original transform until we're ready to apply averaged poses
-                    if (originalTransforms.TryGetValue(markerId, out var originalTransform))
-                    {
-                        markerObject.transform.position = originalTransform.position;
-                        markerObject.transform.rotation = originalTransform.rotation;
-                    }
+                    m_collectedPoses[markerId] = new List<Pose>();
                 }
+                
+                // Pose hinzufügen, wenn noch nicht genug gesammelt wurden
+                if (m_collectedPoses[markerId].Count < m_posesToCollect)
+                {
+                    m_collectedPoses[markerId].Add(newPose);
+                    Debug.Log($"[Pose Collection] Collected pose for marker {markerId}. Total: {m_collectedPoses[markerId].Count}/{m_posesToCollect}");
+                }
+                
+                // Temporäres Objekt aufräumen
+                Destroy(tempObj);
             }
             
-            // Check if we have collected enough poses for all markers
+            // Prüfen ob wir genug Posen haben
             CheckForSufficientPoses();
         }
 
@@ -1205,6 +1214,8 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void CalculateAveragedPoses()
         {
+            bool positionChanged = false;
+            
             foreach (var entry in m_collectedPoses)
             {
                 int markerId = entry.Key;
@@ -1227,6 +1238,9 @@ namespace TryAR.MarkerTracking
                     m_averagedPoses[markerId] = new Pose(avgPosition, avgRotation);
                 }
             }
+            
+            // Apply the averaged poses to the marker GameObjects
+            ApplyAveragedPoses();
         }
 
         /// <summary>
@@ -1234,17 +1248,74 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void ApplyAveragedPoses()
         {
+            bool positionChanged = false;
+            
             foreach (var entry in m_averagedPoses)
             {
                 int markerId = entry.Key;
-                Pose pose = entry.Value;
+                Pose newAvgPose = entry.Value;
                 
-                // Apply the pose to the GameObject if it exists in our dictionary
-                if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
+                // Check if we have a previous average to blend with
+                if (m_previousAveragedPoses.TryGetValue(markerId, out Pose previousAvgPose))
                 {
-                    markerObject.transform.position = pose.position;
-                    markerObject.transform.rotation = pose.rotation;
+                    // Blend the new and previous averaged poses
+                    Vector3 blendedPosition = Vector3.Lerp(newAvgPose.position, previousAvgPose.position, m_previousAverageWeight);
+                    Quaternion blendedRotation = Quaternion.Slerp(newAvgPose.rotation, previousAvgPose.rotation, m_previousAverageWeight);
+                    
+                    // Create the final blended pose
+                    Pose blendedPose = new Pose(blendedPosition, blendedRotation);
+                    
+                    // Store the blended pose as the new previous for next time
+                    m_previousAveragedPoses[markerId] = blendedPose;
+                    
+                    // Apply the blended pose to the GameObject if it exists in our dictionary
+                    if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
+                    {
+                        // Prüfen, ob sich die Position wirklich geändert hat
+                        if (Vector3.Distance(markerObject.transform.position, blendedPose.position) > 0.0001f ||
+                            Quaternion.Angle(markerObject.transform.rotation, blendedPose.rotation) > 0.01f)
+                        {
+                            markerObject.transform.position = blendedPose.position;
+                            markerObject.transform.rotation = blendedPose.rotation;
+                            positionChanged = true;
+                        }
+                    }
                 }
+                else
+                {
+                    // No previous average exists yet, just use the new average
+                    m_previousAveragedPoses[markerId] = newAvgPose;
+                    
+                    // Apply the pose to the GameObject if it exists in our dictionary
+                    if (m_markerGameObjectDictionary.TryGetValue(markerId, out GameObject markerObject))
+                    {
+                        markerObject.transform.position = newAvgPose.position;
+                        markerObject.transform.rotation = newAvgPose.rotation;
+                        positionChanged = true;
+                    }
+                }
+            }
+            
+            // Sound abspielen, wenn sich die Position geändert hat
+            if (positionChanged && m_audioSource != null && m_positionUpdateSound != null)
+            {
+                m_audioSource.PlayOneShot(m_positionUpdateSound);
+                Debug.Log("Position updated - playing sound");
+            }
+            
+            // After applying, reset collection if configured to do so
+            if (m_resetCollectionAfterApplying)
+            {
+                // Clear collected poses to start fresh
+                foreach (var key in m_collectedPoses.Keys.ToList())
+                {
+                    m_collectedPoses[key].Clear();
+                }
+                
+                // Reset sufficient poses flag
+                m_hasSufficientPoses = false;
+                
+                Debug.Log("[Pose Averaging] Reset pose collection after applying averaged poses.");
             }
         }
 
@@ -1277,6 +1348,51 @@ namespace TryAR.MarkerTracking
             }
             
             return result;
+        }
+
+        /// <summary>
+        /// Entfernt Parent-Beziehungen von Marker-Objekten, um unerwünschte Bewegungen zu vermeiden
+        /// </summary>
+        private void UnparentMarkerObjects()
+        {
+            foreach (var entry in m_markerGameObjectDictionary)
+            {
+                GameObject markerObject = entry.Value;
+                if (markerObject != null && markerObject.transform.parent != null)
+                {
+                    Debug.Log($"Unparenting marker object: {markerObject.name} from {markerObject.transform.parent.name}");
+                    markerObject.transform.parent = null; // Root-Level in der Hierarchie
+                }
+            }
+        }
+
+        /// <summary>
+        /// Deaktiviert physikalische Komponenten auf Marker-Objekten
+        /// </summary>
+        private void DisablePhysicsOnMarkerObjects()
+        {
+            foreach (var entry in m_markerGameObjectDictionary)
+            {
+                GameObject markerObject = entry.Value;
+                if (markerObject != null)
+                {
+                    // Rigidbody deaktivieren/einfrieren, falls vorhanden
+                    Rigidbody rb = markerObject.GetComponent<Rigidbody>();
+                    if (rb != null)
+                    {
+                        rb.isKinematic = true;
+                        rb.detectCollisions = false;
+                        Debug.Log($"Froze physics on marker object: {markerObject.name}");
+                    }
+                    
+                    // Alle Collider deaktivieren
+                    Collider[] colliders = markerObject.GetComponentsInChildren<Collider>();
+                    foreach (var collider in colliders)
+                    {
+                        collider.enabled = false;
+                    }
+                }
+            }
         }
     }
 }
