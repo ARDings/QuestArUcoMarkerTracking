@@ -139,21 +139,9 @@ namespace TryAR.MarkerTracking
         private bool m_timeOffsetInitialized = false;
         private long m_systemToUnityTimeOffsetNs = 0;
 
-        // Add the base threshold parameter back - make it tighter since precision is important
-        [SerializeField, Tooltip("Base threshold for time difference (milliseconds)")]
-        private float m_maxAllowedTimeDifferenceMs = 10.0f;  // Tighter threshold for better precision
-
-        // Only increase to 15ms in worst case
-        [SerializeField, Tooltip("Maximum allowed time difference in worst case (milliseconds)")]
-        private float m_maxTimeDifferenceThresholdMs = 30.0f;
-        
-        // Make it harder to increase the threshold
-        [SerializeField, Tooltip("How many consecutive skipped frames before increasing threshold")]
-        private int m_frameSkipToleranceCount = 5;
 
         // Add fields to track skipped frames and adaptive threshold
-        private int m_consecutiveFramesSkipped = 0;
-        private float m_currentTimeDifferenceThresholdMs;
+        public float m_currentTimeDifferenceThresholdMs;
         
         // Add a field to track the last processed frame timestamp
         private long m_lastProcessedFrameTimestamp = 0;
@@ -209,6 +197,28 @@ namespace TryAR.MarkerTracking
         [SerializeField] private bool m_unparentMarkersOnStart = true;
         [SerializeField] private bool m_freezePhysicsOnMarkers = true;
 
+        [Header("Debugging")]
+        [SerializeField] private bool m_showMarkerPositionVisualizations = true;
+        [SerializeField] private Material m_markerVisualizationMaterial;
+        [SerializeField] private Material m_averagedPositionMaterial;
+        private Dictionary<int, GameObject> m_markerVisualizations = new Dictionary<int, GameObject>();
+        private Dictionary<int, GameObject> m_averagedPositionVisualizations = new Dictionary<int, GameObject>();
+
+        [Header("Board Visualization")]
+        [SerializeField] private GameObject m_boardPrefab;
+        [SerializeField] private bool m_showBoardVisualization = true;
+        private GameObject m_boardVisualization;
+
+        [Header("Board Rotation Limits")]
+        [SerializeField] private float m_maxRotationSpeedDegreesPerSecond = 30f; // Maximale Drehgeschwindigkeit in Grad/Sekunde
+        [SerializeField] private bool m_enableRotationSpeedLimit = true;
+        private float m_lastYRotation = 0f;
+        private float m_lastRotationUpdateTime = 0f;
+        private bool m_initialRotationSet = false;
+
+        // Erhöhe den Schwellenwert für die Zeitdifferenz, da wir jetzt nur 5 FPS haben
+        // Bei 5 FPS haben wir 200ms zwischen den Frames, also sollten wir einen höheren Schwellenwert setzen
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -259,7 +269,6 @@ namespace TryAR.MarkerTracking
             }
 
             // Initialize the adaptive threshold to the base value
-            m_currentTimeDifferenceThresholdMs = m_maxAllowedTimeDifferenceMs;
 
             if (m_unparentMarkersOnStart)
             {
@@ -270,6 +279,9 @@ namespace TryAR.MarkerTracking
             {
                 DisablePhysicsOnMarkerObjects();
             }
+
+            // Das komplette Einfrieren einmal zu Beginn ausführen
+            FreezeMarkerObjects();
         }
 
         /// <summary>
@@ -292,7 +304,6 @@ namespace TryAR.MarkerTracking
                 {
                     return;
                 }
-                
                 m_lastProcessedFrameTimestamp = frame.Timestamps.SensorTimestampNs;
 
                 if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
@@ -302,13 +313,22 @@ namespace TryAR.MarkerTracking
                         Debug.Log($"[ArUco Tracking] Detecting marker with timestamp: {frame.Timestamps.UnixTimestampMs}, {frame.Timestamps.SensorTimestampNs}, {frame.Timestamps.SystemTimestampNs}");
                         
                         // Get the closest historical camera pose for this frame
-                        Transform historicalCameraTransform = GetCameraPoseForTimestamp(frame.Timestamps.SensorTimestampNs);
                         
+
+
+
+
+
                         // Check if we have a decent time match before processing the frame
                         long timeDiff = Math.Abs(m_cameraPoseHistory[m_cameraPoseHistoryIndex].Timestamp - frame.Timestamps.SensorTimestampNs);
                         float timeDiffMs = timeDiff / 1000000.0f;
+
                         
-                        if (timeDiffMs <= m_currentTimeDifferenceThresholdMs && historicalCameraTransform != null)
+                        
+                        Transform historicalCameraTransform = GetCameraPoseForTimestamp(frame.Timestamps.SensorTimestampNs);
+
+                        
+                        if (historicalCameraTransform != null)
                         {
                             // Clear previously detected markers
                             m_detectedMarkersInCurrentFrame.Clear();
@@ -358,7 +378,8 @@ namespace TryAR.MarkerTracking
                                     
                                     // Only use high-quality detections for pose estimation
                                     bool isHighQualityDetection = (
-                                                                   qualityClass == ArUcoMarkerTracking.DetectionQualityClass.Excellent);
+                                                                   qualityClass == ArUcoMarkerTracking.DetectionQualityClass.Excellent
+                                                                );
                                     
                                     // Only process pose estimation if detection quality is sufficient
                                     if (isHighQualityDetection)
@@ -369,7 +390,7 @@ namespace TryAR.MarkerTracking
                                         // Apply the averaged poses ONLY if we have enough poses
                                         if (m_hasSufficientPoses)
                                         {
-                                            ApplyAveragedPoses();
+                                            CalculateAveragedPoses();
                                             SetMarkerObjectsVisibility(true);
                                         }
                                     }
@@ -405,7 +426,7 @@ namespace TryAR.MarkerTracking
                         else
                         {
                             // Skip this frame as the time match is too poor
-                            Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
+                           // Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
                             CleanupTemporaryTransform(historicalCameraTransform);
                         }
                     }
@@ -425,6 +446,31 @@ namespace TryAR.MarkerTracking
             {
                 float successRate = (float)m_processedFrameCount / (m_processedFrameCount + m_skippedFrameCount) * 100f;
                 Debug.Log($"[Camera Sync] Stats: Processed {m_processedFrameCount} frames, Skipped {m_skippedFrameCount} frames ({successRate:F1}% success rate)");
+            }
+
+            // Zeige Informationen über alle erkannten Marker an
+        
+
+            // Log all detected markers regardless of quality
+         
+
+
+
+            // Log nur die letzten 5 gespeicherten Posen
+            if (Time.frameCount % 30 == 0) // Auch nur alle 30 Frames
+            {
+                Debug.Log("[Pose History] Last 5 saved poses:");
+                var recentPoses = m_cameraPoseHistory
+                    .Where(p => p.Timestamp > 0)
+                    .OrderByDescending(p => p.Timestamp)
+                    .Take(5);
+                    
+                foreach (var pose in recentPoses)
+                {
+                    Debug.Log($"  Pose at {pose.Timestamp/1000000.0f}ms:" +
+                              $"\n    Position: {pose.Position}" + 
+                              $"\n    Rotation: {pose.Rotation}");
+                }
             }
         }
 
@@ -908,6 +954,14 @@ namespace TryAR.MarkerTracking
                 Position = cameraPose.position,
                 Rotation = cameraPose.rotation
             };
+
+            // Log nur alle 30 Frames (ca. 1x pro Sekunde bei 30fps)
+            if (Time.frameCount % 30 == 0)
+            {
+                Debug.Log($"[Camera Pose] Stored new pose at {adjustedTimestamp/1000000.0f}ms:" +
+                          $"\n    Position: {cameraPose.position}" +
+                          $"\n    Rotation: {cameraPose.rotation}");
+            }
         }
 
         /// <summary>
@@ -925,6 +979,7 @@ namespace TryAR.MarkerTracking
 
             Debug.Log($"[Camera Sync] Checking pose match for frame {adjustedTimestamp} (original: {sensorTimestamp}, offset: {m_manualTimeOffsetMs}ms). Available timestamps: " + 
                       string.Join(", ", m_cameraPoseHistory.Where(p => p.Timestamp > 0).Select(p => p.Timestamp).ToArray()));
+
 
             for (int i = 0; i < m_cameraPoseHistorySize; i++)
             {
@@ -965,21 +1020,10 @@ namespace TryAR.MarkerTracking
                     Debug.LogWarning($"[Camera Sync] Using suboptimal camera pose match with {timeDiffMs}ms difference (exceeds {m_currentTimeDifferenceThresholdMs}ms threshold). Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
                     
                     // Increase consecutive skip count
-                    m_consecutiveFramesSkipped++;
                     m_skippedFrameCount++;
                     
-                    // If we've skipped too many frames in a row, adapt the threshold
-                    if (m_consecutiveFramesSkipped > m_frameSkipToleranceCount && 
-                        m_currentTimeDifferenceThresholdMs < m_maxTimeDifferenceThresholdMs)
-                    {
-                        // Gradually increase threshold
-                        float newThreshold = Mathf.Min(
-                            m_currentTimeDifferenceThresholdMs + 1.0f,
-                            m_maxTimeDifferenceThresholdMs);
-                            
-                        Debug.Log($"[Camera Sync] Increasing time threshold to {newThreshold}ms after {m_consecutiveFramesSkipped} consecutive skips");
-                        m_currentTimeDifferenceThresholdMs = newThreshold;
-                    }
+               
+              
                     
                     Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
                     CleanupTemporaryTransform(tempObj.transform);
@@ -987,29 +1031,16 @@ namespace TryAR.MarkerTracking
                 }
                 else
                 {
-                    // Reset consecutive skip counter when we get a good match
-                    if (m_consecutiveFramesSkipped > 0)
-                    {
-                        Debug.Log($"[Camera Sync] Reset skip counter after {m_consecutiveFramesSkipped} consecutive skips");
-                        m_consecutiveFramesSkipped = 0;
-                        
-                        // Gradually decrease threshold back toward base value
-                        if (m_currentTimeDifferenceThresholdMs > m_maxAllowedTimeDifferenceMs)
-                        {
-                            m_currentTimeDifferenceThresholdMs = Mathf.Max(
-                                m_currentTimeDifferenceThresholdMs - 0.5f,
-                                m_maxAllowedTimeDifferenceMs);
-                            Debug.Log($"[Camera Sync] Decreasing time threshold to {m_currentTimeDifferenceThresholdMs}ms");
-                        }
-                    }
+              
                     
                     m_processedFrameCount++;
                     Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
                 }
             }
             
-            ApplyRandomColors(tempObj);
-
+           // ApplyRandomColors(tempObj);
+//Camera Sync sending transform
+Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.position}, {tempObj.transform.rotation}");
             return tempObj.transform;
         }
 
@@ -1052,15 +1083,19 @@ namespace TryAR.MarkerTracking
             }
         }
 
-        private void OnDestroy()
+        private void OnDisable()
         {
-            // Stop processing thread
-            m_isProcessing = false;
-            m_processingThread?.Join();
+            // Bestehender Code...
             
-            if (m_rgbMat != null) m_rgbMat.Dispose();
-            if (m_hsvMat != null) m_hsvMat.Dispose();
-            if (m_thresholdMat != null) m_thresholdMat.Dispose();
+            // Visualisierungen entfernen
+            ClearMarkerVisualizations();
+
+            // Im OnDisable
+            if (m_boardVisualization != null)
+            {
+                Destroy(m_boardVisualization);
+                m_boardVisualization = null;
+            }
         }
 
         // Add a new method to calculate time offset
@@ -1135,47 +1170,59 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void CollectPosesWithoutAffectingTransforms(Transform cameraTransform)
         {
-            // Erstelle temporäre GameObjects für ArUco-Berechnungen
-            Dictionary<int, GameObject> tempObjects = new Dictionary<int, GameObject>();
+            // Abrufen der erkannten Marker-IDs
+            HashSet<int> detectedMarkers = m_arucoMarkerTracking.GetDetectedMarkerIds();
             
-            // Für jeden Marker ein temporäres Objekt erstellen
-            foreach (var entry in m_markerGameObjectDictionary)
+            // Log welche Marker erkannt wurden
+            Debug.Log($"[CollectPoses] Detected markers for collection: {string.Join(", ", detectedMarkers)}");
+            
+            if (detectedMarkers.Count == 0)
             {
-                int markerId = entry.Key;
-                GameObject tempObj = new GameObject($"TempMarker_{markerId}");
-                tempObjects[markerId] = tempObj;
+                Debug.Log("[CollectPoses] No markers detected for pose collection");
+                return;
             }
             
-            // Pose-Estimation auf temporären Objekten durchführen
-            m_arucoMarkerTracking.EstimatePoseCanonicalMarker(tempObjects, cameraTransform);
+            // Erstelle temporäre GameObjects für die Pose-Schätzung
+            Dictionary<int, GameObject> tempMarkerObjects = new Dictionary<int, GameObject>();
             
-            // Posen sammeln
-            foreach (var entry in tempObjects)
+            foreach (int markerId in detectedMarkers)
+            {
+                GameObject tempObj = new GameObject($"TempMarker_{markerId}");
+                tempMarkerObjects[markerId] = tempObj;
+            }
+            
+            // Schätze die Posen für die temporären Objekte
+            m_arucoMarkerTracking.EstimatePoseCanonicalMarker(tempMarkerObjects, cameraTransform);
+            
+            // Sammle die Posen von den temporären Objekten
+            foreach (var entry in tempMarkerObjects)
             {
                 int markerId = entry.Key;
                 GameObject tempObj = entry.Value;
                 
-                // Pose erfassen
-                Pose newPose = new Pose(tempObj.transform.position, tempObj.transform.rotation);
-                
-                // Liste initialisieren falls nötig
-                if (!m_collectedPoses.ContainsKey(markerId))
+                // Sammle nur Posen für Marker, die wir in der ArObjects-Liste haben
+                if (m_markerGameObjectDictionary.ContainsKey(markerId))
                 {
-                    m_collectedPoses[markerId] = new List<Pose>();
+                    // Erstelle eine neue Pose aus der temporären Transform
+                    Pose detectedPose = new Pose(tempObj.transform.position, tempObj.transform.rotation);
+                    
+                    // Füge die Pose zur Sammlung hinzu
+                    if (!m_collectedPoses.ContainsKey(markerId))
+                    {
+                        m_collectedPoses[markerId] = new List<Pose>();
+                    }
+                    
+                    m_collectedPoses[markerId].Add(detectedPose);
+                    
+                    // Log der gesammelten Pose
+                    Debug.Log($"[CollectPoses] Marker {markerId} pose collected: Pos={detectedPose.position}, Rot={detectedPose.rotation.eulerAngles}");
                 }
                 
-                // Pose hinzufügen, wenn noch nicht genug gesammelt wurden
-                if (m_collectedPoses[markerId].Count < m_posesToCollect)
-                {
-                    m_collectedPoses[markerId].Add(newPose);
-                    Debug.Log($"[Pose Collection] Collected pose for marker {markerId}. Total: {m_collectedPoses[markerId].Count}/{m_posesToCollect}");
-                }
-                
-                // Temporäres Objekt aufräumen
+                // Temporäres Objekt entfernen
                 Destroy(tempObj);
             }
             
-            // Prüfen ob wir genug Posen haben
+            // Überprüfe, ob wir genügend Posen für die Mittelwertbildung haben
             CheckForSufficientPoses();
         }
 
@@ -1214,7 +1261,9 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void CalculateAveragedPoses()
         {
-            bool positionChanged = false;
+            // Debug-Log hinzufügen, um zu sehen, welche Marker erkannt werden
+            string detectedMarkers = string.Join(", ", m_collectedPoses.Keys);
+            Debug.Log($"[CalculateAveragedPoses] Calculating poses for markers: {detectedMarkers}");
             
             foreach (var entry in m_collectedPoses)
             {
@@ -1236,6 +1285,8 @@ namespace TryAR.MarkerTracking
                     
                     // Store the averaged pose
                     m_averagedPoses[markerId] = new Pose(avgPosition, avgRotation);
+                    
+                    Debug.Log($"[CalculateAveragedPoses] Marker {markerId} - Position: {avgPosition}, Rotation: {avgRotation.eulerAngles}");
                 }
             }
             
@@ -1337,6 +1388,15 @@ namespace TryAR.MarkerTracking
             {
                 m_audioSource.PlayOneShot(m_positionUpdateSound);
                 Debug.Log("Position updated - playing sound");
+                
+                // Hier komplett einfrieren:
+                FreezeMarkerObjects();
+            }
+            
+            // Visualisierungen aktualisieren
+            if (m_showMarkerPositionVisualizations)
+            {
+                UpdateMarkerVisualizations();
             }
             
             // After applying, reset collection if configured to do so
@@ -1353,6 +1413,9 @@ namespace TryAR.MarkerTracking
                 
                 Debug.Log("[Pose Averaging] Reset pose collection after applying averaged poses.");
             }
+
+            // Nach dem Anwenden der Posen auch das Board aktualisieren
+            UpdateBoardVisualization();
         }
 
         /// <summary>
@@ -1384,6 +1447,150 @@ namespace TryAR.MarkerTracking
             }
             
             return result;
+        }
+
+        /// <summary>
+        /// Erstellt oder aktualisiert Visualisierungen für Marker-Positionen
+        /// </summary>
+        private void UpdateMarkerVisualizations()
+        {
+            Debug.Log($"[Visualization] Updating visualizations for {m_markerGameObjectDictionary.Count} markers and {m_averagedPoses.Count} averaged poses");
+            
+            // Visualisierungen für die tatsächlichen Marker-Positionen
+            foreach (var entry in m_markerGameObjectDictionary)
+            {
+                int markerId = entry.Key;
+                GameObject markerObject = entry.Value;
+                
+                if (markerObject != null)
+                {
+                    // Erstelle oder aktualisiere die Marker-Visualisierung
+                    if (!m_markerVisualizations.TryGetValue(markerId, out GameObject visualization))
+                    {
+                        // Erstelle eine neue Sphere für die Marker-Position
+                        visualization = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                        visualization.name = $"MarkerVisualization_{markerId}";
+                        visualization.transform.localScale = new Vector3(0.1f, 0.1f, 0.1f);
+                        
+                        // Material zuweisen, falls vorhanden
+                        if (m_markerVisualizationMaterial != null)
+                        {
+                            Renderer renderer = visualization.GetComponent<Renderer>();
+                            if (renderer != null)
+                            {
+                                renderer.material = m_markerVisualizationMaterial;
+                            }
+                        }
+                        
+                        // Kollisionen deaktivieren
+                        Collider collider = visualization.GetComponent<Collider>();
+                        if (collider != null)
+                        {
+                            collider.enabled = false;
+                        }
+                        
+                        m_markerVisualizations[markerId] = visualization;
+                        Debug.Log($"[Visualization] Created marker visualization for marker {markerId} at {markerObject.transform.position}");
+                    }
+                    
+                    // Position aktualisieren
+                    visualization.transform.position = markerObject.transform.position;
+                    visualization.transform.rotation = Quaternion.identity; // Keine Rotation für die Visualisierung
+                }
+            }
+            
+            // Visualisierung für die Mitte des Boards hinzufügen
+            if (m_averagedPoses.ContainsKey(0) && m_averagedPoses.ContainsKey(2) && m_averagedPoses.ContainsKey(3))
+            {
+                // Berechne die Mitte des Boards aus den Positionen von Marker 0, 2 und 3
+                Vector3 boardCenter = (m_averagedPoses[0].position + m_averagedPoses[2].position + m_averagedPoses[3].position) / 3f;
+                
+                if (!m_markerVisualizations.TryGetValue(-1, out GameObject centerVisualization))
+                {
+                    centerVisualization = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    centerVisualization.name = "BoardCenterVisualization";
+                    centerVisualization.transform.localScale = new Vector3(0.15f, 0.15f, 0.15f);
+                    
+                    // Ein anderes Material verwenden, um das Zentrum zu markieren
+                    Renderer renderer = centerVisualization.GetComponent<Renderer>();
+                    if (renderer != null)
+                    {
+                        renderer.material = new Material(Shader.Find("Standard"));
+                        renderer.material.color = Color.yellow;
+                    }
+                    
+                    Collider collider = centerVisualization.GetComponent<Collider>();
+                    if (collider != null)
+                    {
+                        collider.enabled = false;
+                    }
+                    
+                    m_markerVisualizations[-1] = centerVisualization;
+                }
+                
+                centerVisualization.transform.position = boardCenter;
+                Debug.Log($"[Visualization] Updated board center visualization at {boardCenter}");
+            }
+            
+            // Visualisierungen für die gemittelten Positionen
+            foreach (var entry in m_averagedPoses)
+            {
+                int markerId = entry.Key;
+                Pose avgPose = entry.Value;
+                
+                // Erstelle oder aktualisiere die gemittelte Positions-Visualisierung
+                if (!m_averagedPositionVisualizations.TryGetValue(markerId, out GameObject avgVisualization))
+                {
+                    // Erstelle eine neue Sphere für die gemittelte Position
+                    avgVisualization = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    avgVisualization.name = $"AvgPoseVisualization_{markerId}";
+                    avgVisualization.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
+                    
+                    // Material zuweisen, falls vorhanden
+                    if (m_averagedPositionMaterial != null)
+                    {
+                        Renderer renderer = avgVisualization.GetComponent<Renderer>();
+                        if (renderer != null)
+                        {
+                            renderer.material = m_averagedPositionMaterial;
+                        }
+                    }
+                    else
+                    {
+                        // Fallback-Material mit verschiedenen Farben je nach Marker-ID
+                        Renderer renderer = avgVisualization.GetComponent<Renderer>();
+                        if (renderer != null)
+                        {
+                            renderer.material = new Material(Shader.Find("Standard"));
+                            
+                            // Verschiedene Farben je nach Marker-ID
+                            switch(markerId)
+                            {
+                                case 0: renderer.material.color = Color.red; break;
+                                case 1: renderer.material.color = Color.green; break;
+                                case 2: renderer.material.color = Color.blue; break;
+                                case 3: renderer.material.color = Color.cyan; break;
+                                default: renderer.material.color = Color.magenta; break;
+                            }
+                        }
+                    }
+                    
+                    // Kollisionen deaktivieren
+                    Collider collider = avgVisualization.GetComponent<Collider>();
+                    if (collider != null)
+                    {
+                        collider.enabled = false;
+                    }
+                    
+                    m_averagedPositionVisualizations[markerId] = avgVisualization;
+                    Debug.Log($"[Visualization] Created averaged position visualization for marker {markerId}");
+                }
+                
+                // Position aktualisieren
+                avgVisualization.transform.position = avgPose.position;
+                avgVisualization.transform.rotation = Quaternion.identity; // Keine Rotation für die Visualisierung
+                Debug.Log($"[Visualization] Updated averaged position for marker {markerId} at {avgPose.position}");
+            }
         }
 
         /// <summary>
@@ -1430,6 +1637,220 @@ namespace TryAR.MarkerTracking
                 }
             }
         }
+
+        /// <summary>
+        /// Entfernt alle Marker-Visualisierungen
+        /// </summary>
+        private void ClearMarkerVisualizations()
+        {
+            // Lösche Marker-Visualisierungen
+            foreach (var visualization in m_markerVisualizations.Values)
+            {
+                if (visualization != null)
+                {
+                    Destroy(visualization);
+                }
+            }
+            m_markerVisualizations.Clear();
+            
+            // Lösche gemittelte Positions-Visualisierungen
+            foreach (var visualization in m_averagedPositionVisualizations.Values)
+            {
+                if (visualization != null)
+                {
+                    Destroy(visualization);
+                }
+            }
+            m_averagedPositionVisualizations.Clear();
+        }
+
+        /// <summary>
+        /// Zeigt Informationen über alle erkannten Marker an
+        /// </summary>
+        private void LogAllDetectedMarkers()
+        {
+            if (m_arucoMarkerTracking == null) return;
+            
+            HashSet<int> detectedMarkerIds = m_arucoMarkerTracking.GetDetectedMarkerIds();
+            Dictionary<int, ArUcoMarkerTracking.MarkerQualityMetrics> qualityMetrics = 
+                m_arucoMarkerTracking.GetDetectionQualityMetrics();
+            
+            // Liste aller erkannten Marker-IDs
+            string markersStr = string.Join(", ", detectedMarkerIds);
+            Debug.Log($"[Marker Detection] Raw detected markers: {markersStr}");
+            
+            // Details zu jedem Marker
+            foreach (int markerId in detectedMarkerIds)
+            {
+                if (qualityMetrics.TryGetValue(markerId, out var metrics))
+                {
+                    Debug.Log($"[Marker {markerId}] Area: {metrics.Area:F1} px², " +
+                              $"Perimeter: {metrics.Perimeter:F1} px, " +
+                              $"Corner precision: {metrics.CornerPrecision:F3}");
+                }
+            }
+        }
+
+        /// <summary>
+        /// Berechnet die gemittelte Position und Rotation für das gesamte Board
+        /// </summary>
+        private void UpdateBoardVisualization()
+        {
+            if (!m_showBoardVisualization || m_boardPrefab == null || m_averagedPoses.Count == 0)
+                return;
+            
+            // Erstelle das Board-Objekt, falls es noch nicht existiert
+            if (m_boardVisualization == null)
+            {
+                m_boardVisualization = Instantiate(m_boardPrefab);
+                m_boardVisualization.name = "BoardVisualization";
+            }
+            
+            // Berechne den Mittelpunkt aller Marker
+            Vector3 centerPosition = Vector3.zero;
+            int count = 0;
+            
+            foreach (var pose in m_averagedPoses.Values)
+            {
+                centerPosition += pose.position;
+                count++;
+            }
+            
+            if (count > 0)
+            {
+                centerPosition /= count;
+            }
+            
+            // Berechne die Rotation aus der Richtung Marker 0 -> Marker 2
+            Quaternion boardRotation = Quaternion.identity;
+            
+            if (m_averagedPoses.ContainsKey(0) && m_averagedPoses.ContainsKey(2))
+            {
+                Vector3 marker0Position = m_averagedPoses[0].position;
+                Vector3 marker2Position = m_averagedPoses[2].position;
+                
+                // Berechne Richtungsvektor von Marker 0 zu Marker 2
+                Vector3 direction = marker2Position - marker0Position;
+                
+                // Entferne Y-Komponente für eine horizontale Ausrichtung
+                direction.y = 0; 
+                
+                // Nur fortfahren, wenn die Marker einen signifikanten Abstand haben
+                if (direction.magnitude > 0.001f)
+                {
+                    // Normalisiere den Vektor 
+                    direction.Normalize();
+                    
+                    // Berechne LookAt-Rotation
+                    boardRotation = Quaternion.LookRotation(direction, Vector3.up);
+                    
+                    // WICHTIG: Extrahiere nur die Y-Komponente für eine stabile Rotation
+                    float yRotation = boardRotation.eulerAngles.y;
+                    boardRotation = Quaternion.Euler(0, yRotation, 0);
+                    
+                    // Vermeide plötzliche Sprünge in der Rotation durch Stabilisierung
+                    if (m_boardVisualization.transform.rotation != Quaternion.identity)
+                    {
+                        float currentYRotation = m_boardVisualization.transform.rotation.eulerAngles.y;
+                        float angleDifference = Mathf.DeltaAngle(currentYRotation, yRotation);
+                        
+                        // Wenn der Winkelunterschied zu groß ist (z.B. nahe 180 Grad), behalte die aktuelle Rotation bei
+                        if (Mathf.Abs(angleDifference) > 90f)
+                        {
+                            // Wir drehen die Richtung um und addieren 180 Grad
+                            yRotation = (currentYRotation + 180f) % 360f;
+                            boardRotation = Quaternion.Euler(0, yRotation, 0);
+                            Debug.LogWarning($"[Board] Detected rotation flip! Stabilizing to {yRotation} degrees");
+                        }
+                        else if (Mathf.Abs(angleDifference) > 10f)
+                        {
+                            // Für kleinere Änderungen, sanft interpolieren
+                            float smoothedYRotation = Mathf.LerpAngle(currentYRotation, yRotation, 0.2f);
+                            boardRotation = Quaternion.Euler(0, smoothedYRotation, 0);
+                            Debug.Log($"[Board] Smoothing rotation from {currentYRotation} to {yRotation} = {smoothedYRotation}");
+                        }
+                    }
+                    
+                    Debug.Log($"[Board] Using look-at rotation from marker 0 to 2: {boardRotation.eulerAngles.y} degrees");
+                }
+            }
+            else
+            {
+                Debug.Log("[Board] Could not calculate rotation - both markers 0 and 2 required");
+            }
+            
+            // Board-Position und -Rotation aktualisieren
+            m_boardVisualization.transform.position = centerPosition;
+            m_boardVisualization.transform.rotation = boardRotation;
+            
+            Debug.Log($"[Board] Updated visualization at position {centerPosition}, rotation {boardRotation.eulerAngles}");
+        }
+
+        /// <summary>
+        /// Friert alle Marker-Objekte an ihrer aktuellen Position ein
+        /// </summary>
+        private void FreezeMarkerObjects()
+        {
+            foreach (var entry in m_markerGameObjectDictionary)
+            {
+                GameObject markerObject = entry.Value;
+                if (markerObject == null) continue;
+                
+                // Sicherstellen, dass das Objekt keine Parent-Transformation erbt
+                if (markerObject.transform.parent != null)
+                {
+                    markerObject.transform.SetParent(null, true);
+                }
+                
+                // Alle Physik deaktivieren
+                Rigidbody rb = markerObject.GetComponent<Rigidbody>();
+                if (rb != null)
+                {
+                    rb.isKinematic = true;
+                    rb.detectCollisions = false;
+                }
+                
+                // Alle Animatoren stoppen
+                Animator animator = markerObject.GetComponent<Animator>();
+                if (animator != null)
+                {
+                    animator.enabled = false;
+                }
+                
+                // Alle Scripts finden und deaktivieren, die Transform ändern könnten (außer unserem)
+                MonoBehaviour[] scripts = markerObject.GetComponents<MonoBehaviour>();
+                foreach (MonoBehaviour script in scripts)
+                {
+                    // Unser eigenes Script nicht deaktivieren
+                    if (script != this && script.GetType() != typeof(ArUcoTrackingAppCoordinator))
+                    {
+                        script.enabled = false;
+                    }
+                }
+                
+                Debug.Log($"Completely froze object: {markerObject.name}");
+            }
+            
+            // Auch das Board-Objekt einfrieren, falls vorhanden
+            if (m_boardVisualization != null)
+            {
+                if (m_boardVisualization.transform.parent != null)
+                {
+                    m_boardVisualization.transform.SetParent(null, true);
+                }
+                
+                // Physik auf dem Board deaktivieren
+                Rigidbody boardRb = m_boardVisualization.GetComponent<Rigidbody>();
+                if (boardRb != null)
+                {
+                    boardRb.isKinematic = true;
+                    boardRb.detectCollisions = false;
+                }
+                
+                Debug.Log("Froze board visualization object");
+            }
+        }
     }
 }
+
 

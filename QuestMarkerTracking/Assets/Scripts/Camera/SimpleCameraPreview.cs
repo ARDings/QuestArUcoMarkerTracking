@@ -2,6 +2,8 @@ using UnityEngine;
 using UnityEngine.UI;
 using Uralstech.UXR.QuestCamera;
 using System;  // Für Exception
+using System.Collections.Generic;
+using System.Linq;
 
 public class SimpleCameraPreview : MonoBehaviour
 {
@@ -86,6 +88,33 @@ public class SimpleCameraPreview : MonoBehaviour
 
     // Add a field to track if we have a new frame
     private bool _hasNewFrame = false;
+
+    // Neue Felder für Kamera-FPS Tracking
+    private float _lastCameraFrameTime = 0;
+    private int _cameraFrameCount = 0;
+    private float _lastCameraFpsLogTime = 0;
+    private Queue<float> _frameIntervals = new Queue<float>();
+    private const int MAX_INTERVAL_SAMPLES = 10;
+
+    private const float TARGET_FPS = 5f;
+    private const float EXPECTED_FRAME_INTERVAL_MS = 1000f / TARGET_FPS; // 200ms bei 5 FPS
+
+    [Serializable]
+    private class CameraPoseData
+    {
+        public float[] rotation;
+        public float[] position;
+    }
+
+    [Serializable]
+    private class FrameData
+    {
+        public long sensorTs;
+        public long systemTs;
+        public long unixTs;
+        public float[] rotation;
+        public float[] position;
+    }
 
     protected void Start()
     {
@@ -228,6 +257,16 @@ public class SimpleCameraPreview : MonoBehaviour
             
             Debug.Log("Right capture session opened.");
         }
+
+        if (_leftCaptureSession != null)
+        {
+            _leftCaptureSession.CaptureSession.OnFrameTimestamps += OnFrameTimestamps;
+        }
+
+        if (_rightCaptureSession != null)
+        {
+            _rightCaptureSession.CaptureSession.OnFrameTimestamps += OnFrameTimestamps;
+        }
     }
 
     protected void OnDestroy()
@@ -296,27 +335,61 @@ public class SimpleCameraPreview : MonoBehaviour
         return Vector2Int.zero;
     }
 
-    private void OnFrameTimestamps(long sensorTs, long systemTs, long unixTs)
+    public void OnFrameTimestamps(string data)
     {
-        Debug.Log($"[SimpleCameraPreview] OnFrameTimestamps called - Sensor: {sensorTs}, System: {systemTs}, Unix: {unixTs}");
-        
-        _currentFrameTimestamps = new FrameTimestamps
+        // Format: "ts:sensorTs:systemTs:unixTs"
+        string[] parts = data.Split(':');
+        if (parts.Length != 4 || parts[0] != "ts")
         {
-            SensorTimestampNs = sensorTs,
-            SystemTimestampNs = systemTs,
-            UnixTimestampMs = unixTs
-        };
-        
-        // Fire the event to notify subscribers
-        OnFrameTimestampsUpdated?.Invoke(_currentFrameTimestamps);
-        
-        Debug.Log($"[SimpleCameraPreview] Timestamps updated - Current values:" +
-                  $"\n  Sensor: {_currentFrameTimestamps.SensorTimestampNs}ns" +
-                  $"\n  System: {_currentFrameTimestamps.SystemTimestampNs}ns" +
-                  $"\n  Unix: {_currentFrameTimestamps.UnixTimestampMs}ms");
+            Debug.LogError($"Failed to parse frame data: Invalid format");
+            Debug.LogError($"Data: {data}");
+            return;
+        }
 
-        // Mark that we have a new frame
-        _hasNewFrame = true;
+        try
+        {
+            long sensorTs = long.Parse(parts[1]);
+            long systemTs = long.Parse(parts[2]);
+            long unixTs = long.Parse(parts[3]);
+
+            // Verarbeite die Timestamps wie benötigt
+            ProcessFrameTimestamps(sensorTs, systemTs, unixTs);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Failed to parse frame data: {e.Message}");
+            Debug.LogError($"Data: {data}");
+        }
+    }
+
+    public void OnImageMetadata(string data)
+    {
+        // Format: "meta:width:height:format:yRowStride:uvRowStride:uvPixelStride"
+        string[] parts = data.Split(':');
+        if (parts.Length != 7 || parts[0] != "meta")
+        {
+            Debug.LogError($"Failed to parse metadata: Invalid format");
+            Debug.LogError($"Data: {data}");
+            return;
+        }
+
+        try
+        {
+            int width = int.Parse(parts[1]);
+            int height = int.Parse(parts[2]);
+            int format = int.Parse(parts[3]);
+            int yRowStride = int.Parse(parts[4]);
+            int uvRowStride = int.Parse(parts[5]);
+            int uvPixelStride = int.Parse(parts[6]);
+
+            // Verarbeite die Metadaten wie benötigt
+            ProcessImageMetadata(width, height, format, yRowStride, uvRowStride, uvPixelStride);
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"Failed to parse metadata: {e.Message}");
+            Debug.LogError($"Data: {data}");
+        }
     }
 
     // Method to forward time offset to capture sessions
@@ -340,4 +413,75 @@ public class SimpleCameraPreview : MonoBehaviour
         _hasNewFrame = false; // Reset after being checked
         return result;
     }
+
+    private void ProcessFrameTimestamps(long sensorTs, long systemTs, long unixTs)
+    {
+        // Log für Debugging
+        Debug.Log($"[Camera Frame] Timestamps:" +
+                 $"\n  Sensor Time: {sensorTs}ns" +
+                 $"\n  System Time: {systemTs}ns" +
+                 $"\n  Unix Time: {unixTs}ms");
+
+        // Aktualisiere die Timestamps
+        _currentFrameTimestamps = new FrameTimestamps
+        {
+            SensorTimestampNs = sensorTs,
+            SystemTimestampNs = systemTs,
+            UnixTimestampMs = unixTs
+        };
+
+        // Benachrichtige Listener über neue Timestamps
+        OnFrameTimestampsUpdated?.Invoke(_currentFrameTimestamps);
+        _hasNewFrame = true;
+
+        // Optional: Berechne und logge Frame-Intervalle
+        float currentTime = Time.realtimeSinceStartup;
+        if (_lastCameraFrameTime > 0)
+        {
+            float interval = (currentTime - _lastCameraFrameTime) * 1000f; // in ms
+            _frameIntervals.Enqueue(interval);
+            if (_frameIntervals.Count > MAX_INTERVAL_SAMPLES)
+            {
+                _frameIntervals.Dequeue();
+            }
+        }
+        _lastCameraFrameTime = currentTime;
+    }
+
+    private void ProcessImageMetadata(int width, int height, int format, 
+                                    int yRowStride, int uvRowStride, int uvPixelStride)
+    {
+        // Log für Debugging
+        Debug.Log($"[Camera Frame] Image Metadata:" +
+                 $"\n  Resolution: {width}x{height}" +
+                 $"\n  Format: {format}" +
+                 $"\n  Y Row Stride: {yRowStride}" +
+                 $"\n  UV Row Stride: {uvRowStride}" +
+                 $"\n  UV Pixel Stride: {uvPixelStride}");
+
+        // Optional: Speichere die Metadaten für späteren Zugriff
+        // Hier könnten wir z.B. eine ImageMetadata Struktur erstellen und füllen
+    }
+
+    public void OnCameraPose(Vector3 position, Quaternion rotation)
+    {
+        Debug.Log($"[Camera Frame] Camera Pose:" +
+                  $"\n  Position: {position}" +
+                  $"\n  Rotation: {rotation}");
+                  
+        _currentCameraPose = new CameraPose
+        {
+            Position = position,
+            Rotation = rotation
+        };
+    }
+
+    public struct CameraPose
+    {
+        public Vector3 Position;
+        public Quaternion Rotation;
+    }
+
+    private CameraPose _currentCameraPose;
+    public CameraPose CurrentCameraPose => _currentCameraPose;
 } 

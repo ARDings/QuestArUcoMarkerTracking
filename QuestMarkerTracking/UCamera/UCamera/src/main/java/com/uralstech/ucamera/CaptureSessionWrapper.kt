@@ -53,6 +53,7 @@ abstract class CaptureSessionWrapper(
     protected val imageReaderHandler = Handler(imageReaderThread.looper)
     protected var captureSession: CameraCaptureSession? = null
     private val captureSessionExecutor = Executors.newSingleThreadExecutor()
+    private var frameCount = 0
 
     init {
         imageReader.setOnImageAvailableListener({ reader ->
@@ -60,11 +61,20 @@ abstract class CaptureSessionWrapper(
 
             val sensorTs = image.timestamp
             val systemTs = System.nanoTime()
-            val unixTimeMs = System.currentTimeMillis()
+            val unixTs = System.currentTimeMillis()
 
             val yPlane = image.planes[0]
             val uPlane = image.planes[1]
             val vPlane = image.planes[2]
+
+            // Timestamps als einfachen String senden
+            val timestampStr = "ts:$sensorTs:$systemTs:$unixTs"
+
+            UnityPlayer.UnitySendMessage(
+                unityListener,
+                "_onFrameTimestamps",
+                timestampStr
+            )
 
             frameCallback.onFrameReady(
                 yPlane.buffer,
@@ -78,7 +88,7 @@ abstract class CaptureSessionWrapper(
                 uPlane.pixelStride,
                 sensorTs,
                 systemTs,
-                unixTimeMs
+                unixTs
             )
 
             image.close()
@@ -155,15 +165,44 @@ abstract class CaptureSessionWrapper(
                     val systemTs = System.nanoTime()
                     val unixTs = System.currentTimeMillis()
 
-                    Log.i(TAG, "Capture completed - Timestamps: Sensor=$sensorTs, System=$systemTs, Unix=$unixTs")
-
-                    val message = "$sensorTs;$systemTs;$unixTs"
-                    Log.i(TAG, "Sending timestamps to Unity: $message")
+                    // Timestamps als einfachen String senden
+                    val timestampStr = "ts:$sensorTs:$systemTs:$unixTs"
 
                     UnityPlayer.UnitySendMessage(
                         unityListener,
                         "_onFrameTimestamps",
-                        message
+                        timestampStr
+                    )
+
+                    // Log nur alle 30 Frames
+                    if (frameCount++ % 30 == 0) {
+                        // Debug: Alle verfügbaren Keys ausgeben
+                        Log.d(TAG, "=== CaptureResult Debug Info ===")
+                        result.keys.forEach { key ->
+                            val value = result.get(key)
+                            Log.d(TAG, "${key.name}: $value")
+                        }
+
+                        try {
+                            val rotation = result.get(CaptureResult.LENS_POSE_ROTATION) as? FloatArray
+                            val position = result.get(CaptureResult.LENS_POSE_TRANSLATION) as? FloatArray
+                            
+                            Log.i(TAG, "Android Camera Pose at ${sensorTs?.div(1000000.0f)}ms:" +
+                                "\n  Position: ${position?.joinToString(",") ?: "null"}" + 
+                                "\n  Rotation (Quaternion): ${rotation?.joinToString(",") ?: "null"}")
+
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to get camera pose:", e)
+                        }
+                    }
+
+                    // Unity wird die Pose später mit diesem Timestamp synchronisieren
+                    val poseStr = "pose:$sensorTs"
+                    
+                    UnityPlayer.UnitySendMessage(
+                        unityListener,
+                        "_onRequestCameraPose", 
+                        poseStr
                     )
                 }
             }

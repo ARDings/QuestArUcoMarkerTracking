@@ -10,6 +10,7 @@ Library: C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\Ques
 --float-mode=Fast
 --generate-link-xml=Temp\burst.link.xml
 --temp-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\Burst
+--debug=Full
 --key-folder=C:/Program Files/Unity/Hub/Editor/6000.0.39f1/Editor/Data/PlaybackEngines/AndroidPlayer
 --decode-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Library\Burst
 --output=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
@@ -27,6 +28,7 @@ Library: C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\Ques
 --float-mode=Fast
 --generate-link-xml=Temp\burst.link.xml
 --temp-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\Burst
+--debug=Full
 --key-folder=C:/Program Files/Unity/Hub/Editor/6000.0.39f1/Editor/Data/PlaybackEngines/AndroidPlayer
 --decode-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Library\Burst
 --output=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
@@ -94,6 +96,7 @@ Library: C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\Ques
 --target-framework=NetFramework
 --generate-link-xml=Temp\burst.link.xml
 --temp-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\Burst
+--debug=Full
 --key-folder=C:/Program Files/Unity/Hub/Editor/6000.0.39f1/Editor/Data/PlaybackEngines/AndroidPlayer
 --decode-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Library\Burst
 --output=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
@@ -209,6 +212,7 @@ Library: C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\Ques
 --target-framework=NetFramework
 --generate-link-xml=Temp\burst.link.xml
 --temp-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\Burst
+--debug=Full
 --key-folder=C:/Program Files/Unity/Hub/Editor/6000.0.39f1/Editor/Data/PlaybackEngines/AndroidPlayer
 --decode-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Library\Burst
 --output=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated
@@ -225,6 +229,7 @@ Library: C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\Ques
 --target-framework=NetFramework
 --generate-link-xml=Temp\burst.link.xml
 --temp-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\Burst
+--debug=Full
 --key-folder=C:/Program Files/Unity/Hub/Editor/6000.0.39f1/Editor/Data/PlaybackEngines/AndroidPlayer
 --decode-folder=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Library\Burst
 --output=C:\Users\Cspin\Documents\GitHub\LaserShow\QuestArUcoMarkerTracking\QuestMarkerTracking\Temp\BurstOutput\tempburstlibs\arm64-v8a\lib_burst_generated

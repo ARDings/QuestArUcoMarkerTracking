@@ -5,6 +5,7 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.util.Log
+import android.util.Range
 import android.view.Surface
 import com.unity3d.player.UnityPlayer
 
@@ -23,20 +24,77 @@ class RepeatingCaptureSessionWrapper(
 
     private val cameraThread = HandlerThread("CameraThread").apply { start() }
     private val cameraHandler = Handler(cameraThread.looper)
+    private var currentCameraPose: CameraPose? = null
 
     override fun startCaptureSession(cameraDevice: CameraDevice, captureTemplate: Int) {
         try {
-            // Setze den ImageReader Listener
             imageReader.setOnImageAvailableListener(this, cameraHandler)
 
             val surfaces = listOf(imageReader.surface)
+
+            // Erstelle CaptureRequest.Builder mit angepassten Parametern
+            val captureRequestBuilder = cameraDevice.createCaptureRequest(captureTemplate).apply {
+                addTarget(imageReader.surface)
+
+                // Setze die Framerate auf 5 FPS
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range<Int>(5, 5))
+
+                // Aktiviere Auto-Exposure
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+
+                // Optional: Setze Priorität auf Bildqualität statt Framerate
+                set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_50HZ)
+            }
 
             cameraDevice.createCaptureSession(
                 surfaces,
                 object : CameraCaptureSession.StateCallback() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         captureSession = session
-                        setRepeatingRequest(cameraDevice, captureTemplate)
+
+                        // Setze den repeating request direkt hier
+                        try {
+                            session.setRepeatingRequest(
+                                captureRequestBuilder.build(),
+                                object : CameraCaptureSession.CaptureCallback() {
+                                    override fun onCaptureCompleted(
+                                        session: CameraCaptureSession,
+                                        request: CaptureRequest,
+                                        result: TotalCaptureResult
+                                    ) {
+                                        // Hole die relevanten Kamera-Sensordaten
+                                        val timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP)
+                                        val focalLength = result.get(CaptureResult.LENS_FOCAL_LENGTH)
+                                        val aperture = result.get(CaptureResult.LENS_APERTURE)
+                                        
+                                        // Hole die physische Orientierung und Position der Kamera
+                                        val orientation = result.get(CaptureResult.LENS_POSE_ROTATION)
+                                        val translation = result.get(CaptureResult.LENS_POSE_TRANSLATION)
+                                        
+                                        // Sende die Zeitstempel und Kamera-Metadaten
+                                        val poseData = "campose:" +
+                                                       "${timestamp}:" +
+                                                       "${focalLength}:" +
+                                                       "${aperture}:" +
+                                                       "${orientation?.joinToString(",")}:" +
+                                                       "${translation?.joinToString(",")}"
+
+                                        UnityPlayer.UnitySendMessage(
+                                            unityListener,
+                                            "_onCameraPose", 
+                                            poseData
+                                        )
+                                    }
+                                },
+                                cameraHandler
+                            )
+                            UnityPlayer.UnitySendMessage(unityListener, "_onSessionRequestSet", "")
+                        } catch (e: CameraAccessException) {
+                            Log.e(TAG, "Failed to set repeating request", e)
+                            UnityPlayer.UnitySendMessage(unityListener, "_onSessionRequestFailed",
+                                e.message ?: "Unknown error")
+                        }
+
                         UnityPlayer.UnitySendMessage(unityListener, "_onSessionConfigured", "")
                     }
 
@@ -55,36 +113,6 @@ class RepeatingCaptureSessionWrapper(
         }
     }
 
-    private fun setRepeatingRequest(cameraDevice: CameraDevice, captureTemplate: Int) {
-        try {
-            val captureRequestBuilder = cameraDevice.createCaptureRequest(captureTemplate)
-            captureRequestBuilder.addTarget(imageReader.surface)
-
-            // Wichtige Kamera-Parameter setzen
-            captureRequestBuilder.set(CaptureRequest.CONTROL_MODE, CameraMetadata.CONTROL_MODE_AUTO)
-            captureRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CameraMetadata.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-
-            captureSession?.setRepeatingRequest(
-                captureRequestBuilder.build(),
-                object : CameraCaptureSession.CaptureCallback() {
-                    override fun onCaptureCompleted(
-                        session: CameraCaptureSession,
-                        request: CaptureRequest,
-                        result: TotalCaptureResult
-                    ) {
-                        // Optional: Hier können Sie zusätzliche Metadaten verarbeiten
-                    }
-                },
-                cameraHandler
-            )
-
-            UnityPlayer.UnitySendMessage(unityListener, "_onSessionRequestSet", "")
-        } catch (e: CameraAccessException) {
-            Log.e(TAG, "Failed to set repeating request", e)
-            UnityPlayer.UnitySendMessage(unityListener, "_onSessionRequestFailed", e.message ?: "Unknown error")
-        }
-    }
-
     override fun closeSession() {
         super.closeSession()
         cameraThread.quitSafely()
@@ -92,18 +120,17 @@ class RepeatingCaptureSessionWrapper(
 
     override fun onImageAvailable(reader: ImageReader) {
         val image = reader.acquireLatestImage() ?: return
-        
+
         try {
-            // Konvertiere das Image in YUV Puffer
             val planes = image.planes
             val yBuffer = planes[0].buffer
             val uBuffer = planes[1].buffer
             val vBuffer = planes[2].buffer
-            
+
             val ySize = yBuffer.remaining()
             val uSize = uBuffer.remaining()
             val vSize = vBuffer.remaining()
-            
+
             val yRowStride = planes[0].rowStride
             val uvRowStride = planes[1].rowStride
             val uvPixelStride = planes[1].pixelStride
@@ -120,30 +147,35 @@ class RepeatingCaptureSessionWrapper(
                 sensorTimestamp, systemTimestamp, unixTimestamp
             )
 
-            // JSON mit Image-Daten und Timestamps erstellen
-            val jsonData = """
-                {
-                    "imageData": {
-                        "width": ${image.width},
-                        "height": ${image.height},
-                        "format": ${image.format},
-                        "yRowStride": $yRowStride,
-                        "uvRowStride": $uvRowStride,
-                        "uvPixelStride": $uvPixelStride
-                    },
-                    "timestamps": {
-                        "sensorTs": $sensorTimestamp,
-                        "systemTs": $systemTimestamp,
-                        "unixTs": $unixTimestamp
-                    }
-                }
-            """.trimIndent()
+            // Verwende das neue einheitliche Format
+            val timestampStr = "ts:$sensorTimestamp:$systemTimestamp:$unixTimestamp"
 
             UnityPlayer.UnitySendMessage(
                 unityListener,
-                "_onImageAvailable",
-                jsonData
+                "_onFrameTimestamps",
+                timestampStr
             )
+
+            // Hole die aktuelle Kamera-Pose
+            currentCameraPose?.let { pose ->
+                val poseStr = "pose:${pose.position.x}:${pose.position.y}:${pose.position.z}:" +
+                        "${pose.rotation.x}:${pose.rotation.y}:${pose.rotation.z}:${pose.rotation.w}"
+                UnityPlayer.UnitySendMessage(
+                    unityListener,
+                    "_onCameraPose",
+                    poseStr
+                )
+            }
+
+            // Optional: Sende auch die Image-Metadaten in einem separaten Event
+            val metadataStr = "meta:${image.width}:${image.height}:${image.format}:$yRowStride:$uvRowStride:$uvPixelStride"
+
+            UnityPlayer.UnitySendMessage(
+                unityListener,
+                "_onImageMetadata",
+                metadataStr
+            )
+
         } finally {
             image.close()
         }

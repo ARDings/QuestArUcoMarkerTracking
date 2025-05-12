@@ -65,7 +65,7 @@ namespace Uralstech.UXR.QuestCamera
         protected AndroidJavaObject _captureSession;
 
         // Event für Timestamps
-        public event System.Action<long, long, long> OnFrameTimestamps;
+        public event System.Action<string> OnFrameTimestamps;
 
         // Neue Struktur für Frame + Timestamp
         private struct FrameData
@@ -110,6 +110,28 @@ namespace Uralstech.UXR.QuestCamera
         // Add these fields to track time synchronization
         private bool _timeOffsetInitialized = false;
         private long _systemToUnityTimeOffsetNs = 0;
+
+        // Timestamp-bezogene Felder
+        private long _lastSensorTimestamp;
+        private long _lastSystemTimestamp;
+        private long _lastUnixTimestamp;
+
+        // Bild-Metadaten Felder
+        private int _imageWidth;
+        private int _imageHeight;
+        private int _imageFormat;
+
+        // Events
+        public event System.Action<string> OnImageMetadata;
+
+        // Properties für externen Zugriff
+        public long LastSensorTimestamp => _lastSensorTimestamp;
+        public long LastSystemTimestamp => _lastSystemTimestamp;
+        public long LastUnixTimestamp => _lastUnixTimestamp;
+        
+        public int ImageWidth => _imageWidth;
+        public int ImageHeight => _imageHeight;
+        public int ImageFormat => _imageFormat;
 
         public void _onImageAvailable(string jsonData)
         {
@@ -159,9 +181,7 @@ namespace Uralstech.UXR.QuestCamera
                 }
 
                 OnFrameTimestamps?.Invoke(
-                    metadata.timestamps.sensorTs,
-                    metadata.timestamps.systemTs,
-                    metadata.timestamps.unixTs
+                    $"{metadata.timestamps.sensorTs}, {metadata.timestamps.systemTs}, {metadata.timestamps.unixTs}"
                 );
             }
             catch (Exception e)
@@ -292,6 +312,135 @@ namespace Uralstech.UXR.QuestCamera
             CurrentState = NativeWrapperState.Closed;
             OnSessionRequestFailed?.Invoke(reason);
         }
+
+        public void _onFrameTimestamps(string data)
+        {
+            // Format: "ts:sensorTs:systemTs:unixTs"
+            string[] parts = data.Split(':');
+            if (parts.Length != 4 || parts[0] != "ts")
+            {
+                Debug.LogError($"[ContinuousCaptureSession] Invalid timestamp format: {data}");
+                return;
+            }
+
+            try
+            {
+                long sensorTs = long.Parse(parts[1]);
+                long systemTs = long.Parse(parts[2]);
+                long unixTs = long.Parse(parts[3]);
+                
+                OnFrameTimestamps?.Invoke(data);
+                
+                // Optional: Speichere die Timestamps für spätere Verwendung
+                _lastSensorTimestamp = sensorTs;
+                _lastSystemTimestamp = systemTs;
+                _lastUnixTimestamp = unixTs;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[ContinuousCaptureSession] Error parsing timestamps: {e.Message}");
+            }
+        }
+
+        public void _onImageMetadata(string data)
+        {
+            // Format: "meta:width:height:format:yRowStride:uvRowStride:uvPixelStride"
+            string[] parts = data.Split(':');
+            if (parts.Length != 7 || parts[0] != "meta")
+            {
+                Debug.LogError($"[ContinuousCaptureSession] Invalid metadata format: {data}");
+                return;
+            }
+
+            try
+            {
+                int width = int.Parse(parts[1]);
+                int height = int.Parse(parts[2]);
+                int format = int.Parse(parts[3]);
+                int yRowStride = int.Parse(parts[4]);
+                int uvRowStride = int.Parse(parts[5]);
+                int uvPixelStride = int.Parse(parts[6]);
+
+                // Optional: Speichere die Metadaten
+                _imageWidth = width;
+                _imageHeight = height;
+                _imageFormat = format;
+                
+                OnImageMetadata?.Invoke(data);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[ContinuousCaptureSession] Error parsing metadata: {e.Message}");
+            }
+        }
+
+        public void _onCameraPose(string data)
+        {
+            Debug.Log($"[ContinuousCaptureSession] _onCameraPose called with data: {data}");
+            
+            string[] parts = data.Split(':');
+            Debug.Log($"[ContinuousCaptureSession] Split parts count: {parts.Length}");
+            Debug.Log($"[ContinuousCaptureSession] First part: {parts[0]}");
+            
+            if (parts[0] != "campose") {
+                Debug.LogWarning($"[ContinuousCaptureSession] Wrong format prefix: {parts[0]} (expected: campose)");
+                return;
+            }
+
+            try {
+                Debug.Log($"[ContinuousCaptureSession] Parsing timestamp from: {parts[1]}");
+                long timestamp = long.Parse(parts[1]);
+                
+                Debug.Log($"[ContinuousCaptureSession] Parsing focal length from: {parts[2]}");
+                float focalLength = parts[2] == "null" ? 0f : float.Parse(parts[2]);
+                
+                Debug.Log($"[ContinuousCaptureSession] Parsing aperture from: {parts[3]}");
+                float aperture = parts[3] == "null" ? 0f : float.Parse(parts[3]);
+                
+                // Parse rotation quaternion
+                Debug.Log($"[ContinuousCaptureSession] Parsing rotation from: {parts[4]}");
+                Vector4 rotation = Vector4.zero;
+                if (parts[4] != "null" && parts[4].Length > 0) {
+                    string[] rotParts = parts[4].Split(',');
+                    Debug.Log($"[ContinuousCaptureSession] Rotation parts count: {rotParts.Length}");
+                    if (rotParts.Length == 4) {
+                        rotation = new Vector4(
+                            float.Parse(rotParts[0]),
+                            float.Parse(rotParts[1]), 
+                            float.Parse(rotParts[2]),
+                            float.Parse(rotParts[3])
+                        );
+                    }
+                }
+
+                // Parse position vector
+                Debug.Log($"[ContinuousCaptureSession] Parsing position from: {parts[5]}");
+                Vector3 position = Vector3.zero;
+                if (parts[5] != "null" && parts[5].Length > 0) {
+                    string[] posParts = parts[5].Split(',');
+                    Debug.Log($"[ContinuousCaptureSession] Position parts count: {posParts.Length}");
+                    if (posParts.Length == 3) {
+                        position = new Vector3(
+                            float.Parse(posParts[0]),
+                            float.Parse(posParts[1]),
+                            float.Parse(posParts[2])
+                        );
+                    }
+                }
+
+                Debug.Log($"[ContinuousCaptureSession] Successfully parsed all data:" +
+                          $"\n  Timestamp: {timestamp}" +
+                          $"\n  Focal Length: {focalLength}mm" +
+                          $"\n  Aperture: f/{aperture}" +
+                          $"\n  Rotation: {rotation}" +
+                          $"\n  Position: {position}");
+
+                OnCameraPose?.Invoke(timestamp, focalLength, aperture, rotation, position);
+            }
+            catch (Exception e) {
+                Debug.LogError($"[ContinuousCaptureSession] Error parsing camera pose: {e.Message}\nData: {data}");
+            }
+        }
 #pragma warning restore IDE1006 // Naming Styles
         #endregion
 
@@ -302,5 +451,7 @@ namespace Uralstech.UXR.QuestCamera
             _timeOffsetInitialized = true;
             Debug.Log($"[ContinuousCaptureSession] Time offset set to {offset/1000000.0f}ms");
         }
+
+        public event Action<long, float, float, Vector4, Vector3> OnCameraPose;
     }
 }
