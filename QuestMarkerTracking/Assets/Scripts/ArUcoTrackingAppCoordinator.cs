@@ -219,6 +219,9 @@ namespace TryAR.MarkerTracking
         // Erhöhe den Schwellenwert für die Zeitdifferenz, da wir jetzt nur 5 FPS haben
         // Bei 5 FPS haben wir 200ms zwischen den Frames, also sollten wir einen höheren Schwellenwert setzen
 
+        // Am Anfang der Klasse
+        private GameObject _tempPoseObject;
+
         /// <summary>
         /// Initializes the camera, permissions, and marker tracking system.
         /// </summary>
@@ -282,6 +285,10 @@ namespace TryAR.MarkerTracking
 
             // Das komplette Einfrieren einmal zu Beginn ausführen
             FreezeMarkerObjects();
+
+            // Erstelle das temporäre Pose-Objekt einmalig
+            _tempPoseObject = new GameObject("HistoricalCameraPose");
+            _tempPoseObject.hideFlags = HideFlags.HideInHierarchy; // Verstecke es im Editor
         }
 
         /// <summary>
@@ -309,9 +316,7 @@ namespace TryAR.MarkerTracking
                 if (m_enableMarkerTracking && m_arucoMarkerTracking.IsReady)
                 {
                     if (frame.IsValid)
-                    {
-                        Debug.Log($"[ArUco Tracking] Detecting marker with timestamp: {frame.Timestamps.UnixTimestampMs}, {frame.Timestamps.SensorTimestampNs}, {frame.Timestamps.SystemTimestampNs}");
-                        
+                    {                        
                         // Get the closest historical camera pose for this frame
                         
 
@@ -360,21 +365,7 @@ namespace TryAR.MarkerTracking
                                     
                                     // Evaluate the overall quality of the detection
                                     var qualityClass = m_arucoMarkerTracking.EvaluateDetectionQuality(detectionMetrics);
-                                    
-                                    // Log detection quality information
-                                    string markerQualityInfo = $"[Grid Board] Marker Detection Quality: {qualityClass}\n";
-                                    foreach (var markerId in m_gridBoardMarkerIds)
-                                    {
-                                        if (detectionMetrics.ContainsKey(markerId))
-                                        {
-                                            var quality = detectionMetrics[markerId];
-                                            markerQualityInfo += $"  - Marker {markerId}: Corner precision: {quality.CornerPrecision:F3}, " +
-                                                                $"Perimeter: {quality.Perimeter:F1} pixels, " +
-                                                                $"Area: {quality.Area:F1} pixels²\n";
-                                        }
-                                    }
-                                    
-                                    Debug.Log($"[Grid Board] All {m_expectedMarkerCount} markers detected in a single frame!\n{markerQualityInfo}");
+                                 
                                     
                                     // Only use high-quality detections for pose estimation
                                     bool isHighQualityDetection = (
@@ -396,12 +387,10 @@ namespace TryAR.MarkerTracking
                                     }
                                     else
                                     {
-                                        Debug.Log("[Grid Board] Detection quality insufficient. Skipping pose estimation.");
                                     }
                                 }
                                 else
                                 {
-                                    Debug.Log($"[Grid Board] Only {detectedMarkers.Count}/{m_expectedMarkerCount} markers detected. Skipping pose estimation.");
                                 }
                             }
                             else
@@ -419,15 +408,11 @@ namespace TryAR.MarkerTracking
                                 // Stattdessen nur Posen sammeln ohne die Objekte zu beeinflussen
                                 CollectPosesWithoutAffectingTransforms(historicalCameraTransform);
                             }
-                            
-                            // Clean up the temporary transform
-                            CleanupTemporaryTransform(historicalCameraTransform);
                         }
                         else
                         {
                             // Skip this frame as the time match is too poor
                            // Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
-                            CleanupTemporaryTransform(historicalCameraTransform);
                         }
                     }
                 }
@@ -445,7 +430,6 @@ namespace TryAR.MarkerTracking
                 (m_processedFrameCount + m_skippedFrameCount) > 0)
             {
                 float successRate = (float)m_processedFrameCount / (m_processedFrameCount + m_skippedFrameCount) * 100f;
-                Debug.Log($"[Camera Sync] Stats: Processed {m_processedFrameCount} frames, Skipped {m_skippedFrameCount} frames ({successRate:F1}% success rate)");
             }
 
             // Zeige Informationen über alle erkannten Marker an
@@ -459,7 +443,6 @@ namespace TryAR.MarkerTracking
             // Log nur die letzten 5 gespeicherten Posen
             if (Time.frameCount % 30 == 0) // Auch nur alle 30 Frames
             {
-                Debug.Log("[Pose History] Last 5 saved poses:");
                 var recentPoses = m_cameraPoseHistory
                     .Where(p => p.Timestamp > 0)
                     .OrderByDescending(p => p.Timestamp)
@@ -467,9 +450,7 @@ namespace TryAR.MarkerTracking
                     
                 foreach (var pose in recentPoses)
                 {
-                    Debug.Log($"  Pose at {pose.Timestamp/1000000.0f}ms:" +
-                              $"\n    Position: {pose.Position}" + 
-                              $"\n    Rotation: {pose.Rotation}");
+                  
                 }
             }
         }
@@ -504,7 +485,6 @@ namespace TryAR.MarkerTracking
             
             // Get actual camera resolution from SimpleCameraPreview
             var actualResolution = m_cameraPreview.GetCurrentResolution();
-            Debug.Log($"[Camera Debug] Actual Camera Resolution: {actualResolution.x}x{actualResolution.y}");
             
             // Use actual resolution instead of native intrinsics resolution
             var width = actualResolution.x / m_processingDivider;
@@ -519,7 +499,6 @@ namespace TryAR.MarkerTracking
             var fx = nativeIntrinsics.FocalLength.x * scaleX / m_processingDivider;
             var fy = nativeIntrinsics.FocalLength.y * scaleY / m_processingDivider;
             
-            Debug.Log($"[Camera Debug] Scaled Parameters: width={width}, height={height}, cx={cx}, cy={cy}, fx={fx}, fy={fy}");
             
             m_arucoMarkerTracking.Initialize(width, height, cx, cy, fx, fy);
             BuildMarkerDictionary();
@@ -610,7 +589,6 @@ namespace TryAR.MarkerTracking
             }
             catch (System.Exception e)
             {
-                Debug.LogError($"BallTracking Error: {e.Message}\n{e.StackTrace}");
             }
         }
 
@@ -648,20 +626,17 @@ namespace TryAR.MarkerTracking
                 if (!m_isAdjustingTimeOffset)
                 {
                     m_isAdjustingTimeOffset = true;
-                    Debug.Log($"[Time Sync] Started adjusting time offset. Current value: {m_manualTimeOffsetMs}ms");
                 }
 
                 // Use right stick Y-axis to adjust time offset
                 if (Mathf.Abs(rightStick.y) > 0.1f)
                 {
                     m_manualTimeOffsetMs += rightStick.y * m_timeOffsetAdjustSpeed;
-                    Debug.Log($"[Time Sync] Adjusted time offset to {m_manualTimeOffsetMs}ms");
                 }
             }
             else if (m_isAdjustingTimeOffset)
             {
                 m_isAdjustingTimeOffset = false;
-                Debug.Log($"[Time Sync] Finished adjusting time offset. Final value: {m_manualTimeOffsetMs}ms");
             }
 
             // Linker Stick: Hue Min/Max
@@ -720,9 +695,6 @@ namespace TryAR.MarkerTracking
                     m_ballOffset.z += m_hsvAdjustSpeed;
                 if (rightTrigger)
                     m_ballOffset.z -= m_hsvAdjustSpeed;
-
-                if (m_showHSVDebug)
-                    Debug.Log($"Ball Offset: {m_ballOffset}");
             }
 
             // Offset-Kontrolle mit beiden Triggern
@@ -736,35 +708,21 @@ namespace TryAR.MarkerTracking
                     // Starte Offset-Einstellung
                     m_isSettingOffset = true;
                     m_controllerStartPosition = controllerPosition;
-                    if (m_showOffsetDebug)
-                        Debug.Log("Started offset adjustment");
                 }
                 else
                 {
                     // Berechne Offset basierend auf Controller-Bewegung
                     m_ballOffset = controllerPosition - m_controllerStartPosition;
-                    
-                    if (m_showOffsetDebug)
-                        Debug.Log($"Ball Offset: {m_ballOffset}");
                 }
             }
             else if (m_isSettingOffset)
             {
                 // Beende Offset-Einstellung
                 m_isSettingOffset = false;
-                if (m_showOffsetDebug)
-                    Debug.Log("Finished offset adjustment");
             }
 
             // Aktualisiere die Werte im ColorObject
             UpdatePinkHSVValues();
-
-            // Debug-Ausgabe der aktuellen Werte
-            if (m_showHSVDebug)
-            {
-                Debug.Log($"HSV Min: H({m_pinkHSVMin.x:F1}) S({m_pinkHSVMin.y:F1}) V({m_pinkHSVMin.z:F1})");
-                Debug.Log($"HSV Max: H({m_pinkHSVMax.x:F1}) S({m_pinkHSVMax.y:F1}) V({m_pinkHSVMax.z:F1})");
-            }
         }
 
         private void ProcessingThreadFunction()
@@ -954,14 +912,6 @@ namespace TryAR.MarkerTracking
                 Position = cameraPose.position,
                 Rotation = cameraPose.rotation
             };
-
-            // Log nur alle 30 Frames (ca. 1x pro Sekunde bei 30fps)
-            if (Time.frameCount % 30 == 0)
-            {
-                Debug.Log($"[Camera Pose] Stored new pose at {adjustedTimestamp/1000000.0f}ms:" +
-                          $"\n    Position: {cameraPose.position}" +
-                          $"\n    Rotation: {cameraPose.rotation}");
-            }
         }
 
         /// <summary>
@@ -969,118 +919,36 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private Transform GetCameraPoseForTimestamp(long sensorTimestamp)
         {
-            // Apply the manual offset to the target timestamp
-            long adjustedTimestamp = sensorTimestamp - (long)(m_manualTimeOffsetMs * 1000000); // Convert ms to ns
-
-            // Find the closest matching pose in our history
+            long adjustedTimestamp = sensorTimestamp - (long)(m_manualTimeOffsetMs * 1000000);
             int bestIndex = 0;
             long bestTimeDiff = long.MaxValue;
             bool foundGoodMatch = false;
 
-            Debug.Log($"[Camera Sync] Checking pose match for frame {adjustedTimestamp} (original: {sensorTimestamp}, offset: {m_manualTimeOffsetMs}ms). Available timestamps: " + 
-                      string.Join(", ", m_cameraPoseHistory.Where(p => p.Timestamp > 0).Select(p => p.Timestamp).ToArray()));
-
-
             for (int i = 0; i < m_cameraPoseHistorySize; i++)
             {
-                if (m_cameraPoseHistory[i].Timestamp == 0) continue; // Skip uninitialized entries
+                if (m_cameraPoseHistory[i].Timestamp == 0) continue;
                 
                 long timeDiff = Math.Abs(m_cameraPoseHistory[i].Timestamp - adjustedTimestamp);
                 if (timeDiff < bestTimeDiff)
                 {
                     bestTimeDiff = timeDiff;
                     bestIndex = i;
-                    
-                    // Check if this is within our acceptable threshold
-                    if (timeDiff / 1000000.0f <= m_currentTimeDifferenceThresholdMs)
-                    {
-                        foundGoodMatch = true;
-                    }
+                    foundGoodMatch = timeDiff / 1000000.0f <= m_currentTimeDifferenceThresholdMs;
                 }
             }
 
-            // Create a temporary transform with the historical pose
-            GameObject tempObj = new GameObject("TemporaryHistoricalCameraPose");
-            tempObj.transform.position = m_cameraPoseHistory[bestIndex].Position;
-            tempObj.transform.rotation = m_cameraPoseHistory[bestIndex].Rotation;
-            
-            // Calculate and log the time difference
-            float timeDiffMs = bestTimeDiff / 1000000.0f;  // Convert ns to ms
-            
-            if (foundGoodMatch)
-            {
-                Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. " +
-                          $"Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
-            }
-            else
-            {
-                // Use adaptive threshold based on consecutive skips
-                if (timeDiffMs > m_currentTimeDifferenceThresholdMs)
-                {
-                    Debug.LogWarning($"[Camera Sync] Using suboptimal camera pose match with {timeDiffMs}ms difference (exceeds {m_currentTimeDifferenceThresholdMs}ms threshold). Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
-                    
-                    // Increase consecutive skip count
-                    m_skippedFrameCount++;
-                    
-               
-              
-                    
-                    Debug.LogWarning($"[Camera Sync] Skipping frame due to large time difference: {timeDiffMs}ms > {m_currentTimeDifferenceThresholdMs}ms threshold");
-                    CleanupTemporaryTransform(tempObj.transform);
-                    return null;
-                }
-                else
-                {
-              
-                    
-                    m_processedFrameCount++;
-                    Debug.Log($"[Camera Sync] Used historical camera pose from {timeDiffMs}ms difference. Frame timestamp: {sensorTimestamp}, Closest pose timestamp: {m_cameraPoseHistory[bestIndex].Timestamp}");
-                }
-            }
-            
-           // ApplyRandomColors(tempObj);
-//Camera Sync sending transform
-Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.position}, {tempObj.transform.rotation}");
-            return tempObj.transform;
-        }
+            // Verwende das existierende GameObject statt ein neues zu erstellen
+            _tempPoseObject.transform.position = m_cameraPoseHistory[bestIndex].Position;
+            _tempPoseObject.transform.rotation = m_cameraPoseHistory[bestIndex].Rotation;
 
-            void ApplyRandomColors(GameObject parent)
-    {
-        Renderer[] renderers = parent.GetComponentsInChildren<Renderer>();
-
-        foreach (Renderer renderer in renderers)
-        {
-            // Instanz des Materials erzeugen, um nur dieses Objekt zu beeinflussen
-            Material mat = renderer.material;
-
-            // Nur ändern, wenn das Material eine _Color-Property besitzt
-            if (mat.HasProperty("_Color"))
+            if (!foundGoodMatch && bestTimeDiff / 1000000.0f > m_currentTimeDifferenceThresholdMs)
             {
-                Color randomColor = new Color(
-                    UnityEngine.Random.value,
-                    UnityEngine.Random.value,
-                    UnityEngine.Random.value
-                );
+                m_skippedFrameCount++;
+                return null;
+            }
 
-                mat.SetColor("_Color", randomColor);
-            }
-            else
-            {
-                Debug.LogWarning($"{renderer.name} hat keine _Color-Property im Material.");
-            }
-        }
-    }
-
-        /// <summary>
-        /// Cleans up the temporary transform created for historical camera pose
-        /// This should be called after using the transform for marker detection
-        /// </summary>
-        private void CleanupTemporaryTransform(Transform tempTransform)
-        {
-            if (tempTransform != null && tempTransform.gameObject.name == "TemporaryHistoricalCameraPose")
-            {
-                Destroy(tempTransform.gameObject);
-            }
+            m_processedFrameCount++;
+            return _tempPoseObject.transform;
         }
 
         private void OnDisable()
@@ -1104,9 +972,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
             long unityTimeNs = (long)(Time.realtimeSinceStartupAsDouble * 1000000000);
             m_systemToUnityTimeOffsetNs = systemTimeNs - unityTimeNs;
             m_timeOffsetInitialized = true;
-            
-            Debug.Log($"[Time Sync] Time offset calculated: {m_systemToUnityTimeOffsetNs/1000000.0f}ms. " +
-                      $"System time: {systemTimeNs/1000000.0f}ms, Unity time: {unityTimeNs/1000000.0f}ms");
         }
 
         // Add method to subscribe to the camera timestamps
@@ -1174,11 +1039,8 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
             HashSet<int> detectedMarkers = m_arucoMarkerTracking.GetDetectedMarkerIds();
             
             // Log welche Marker erkannt wurden
-            Debug.Log($"[CollectPoses] Detected markers for collection: {string.Join(", ", detectedMarkers)}");
-            
             if (detectedMarkers.Count == 0)
             {
-                Debug.Log("[CollectPoses] No markers detected for pose collection");
                 return;
             }
             
@@ -1213,9 +1075,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                     }
                     
                     m_collectedPoses[markerId].Add(detectedPose);
-                    
-                    // Log der gesammelten Pose
-                    Debug.Log($"[CollectPoses] Marker {markerId} pose collected: Pos={detectedPose.position}, Rot={detectedPose.rotation.eulerAngles}");
                 }
                 
                 // Temporäres Objekt entfernen
@@ -1251,7 +1110,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                 if (m_hasSufficientPoses)
                 {
                     CalculateAveragedPoses();
-                    Debug.Log("[Pose Averaging] Sufficient poses collected. Calculated averaged poses.");
                 }
             }
         }
@@ -1261,10 +1119,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
         /// </summary>
         private void CalculateAveragedPoses()
         {
-            // Debug-Log hinzufügen, um zu sehen, welche Marker erkannt werden
-            string detectedMarkers = string.Join(", ", m_collectedPoses.Keys);
-            Debug.Log($"[CalculateAveragedPoses] Calculating poses for markers: {detectedMarkers}");
-            
             foreach (var entry in m_collectedPoses)
             {
                 int markerId = entry.Key;
@@ -1285,8 +1139,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                     
                     // Store the averaged pose
                     m_averagedPoses[markerId] = new Pose(avgPosition, avgRotation);
-                    
-                    Debug.Log($"[CalculateAveragedPoses] Marker {markerId} - Position: {avgPosition}, Rotation: {avgRotation.eulerAngles}");
                 }
             }
             
@@ -1387,10 +1239,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
             if (positionChanged && m_audioSource != null && m_positionUpdateSound != null)
             {
                 m_audioSource.PlayOneShot(m_positionUpdateSound);
-                Debug.Log("Position updated - playing sound");
-                
-                // Hier komplett einfrieren:
-                FreezeMarkerObjects();
             }
             
             // Visualisierungen aktualisieren
@@ -1410,8 +1258,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                 
                 // Reset sufficient poses flag
                 m_hasSufficientPoses = false;
-                
-                Debug.Log("[Pose Averaging] Reset pose collection after applying averaged poses.");
             }
 
             // Nach dem Anwenden der Posen auch das Board aktualisieren
@@ -1454,9 +1300,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
         /// </summary>
         private void UpdateMarkerVisualizations()
         {
-            Debug.Log($"[Visualization] Updating visualizations for {m_markerGameObjectDictionary.Count} markers and {m_averagedPoses.Count} averaged poses");
-            
-            // Visualisierungen für die tatsächlichen Marker-Positionen
             foreach (var entry in m_markerGameObjectDictionary)
             {
                 int markerId = entry.Key;
@@ -1490,7 +1333,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                         }
                         
                         m_markerVisualizations[markerId] = visualization;
-                        Debug.Log($"[Visualization] Created marker visualization for marker {markerId} at {markerObject.transform.position}");
                     }
                     
                     // Position aktualisieren
@@ -1500,11 +1342,26 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
             }
             
             // Visualisierung für die Mitte des Boards hinzufügen
-            if (m_averagedPoses.ContainsKey(0) && m_averagedPoses.ContainsKey(2) && m_averagedPoses.ContainsKey(3))
+            if (m_averagedPoses.Count > 0)
             {
-                // Berechne die Mitte des Boards aus den Positionen von Marker 0, 2 und 3
-                Vector3 boardCenter = (m_averagedPoses[0].position + m_averagedPoses[2].position + m_averagedPoses[3].position) / 3f;
+                // Berechne die Mitte aus allen verfügbaren Marker-Positionen
+                Vector3 boardCenter = Vector3.zero;
+                int markerCount = 0;
                 
+                // Summiere alle Marker-Positionen
+                foreach (var pose in m_averagedPoses.Values)
+                {
+                    boardCenter += pose.position;
+                    markerCount++;
+                }
+                
+                // Berechne den Durchschnitt
+                if (markerCount > 0)
+                {
+                    boardCenter /= markerCount;
+                }
+                
+                // Erstelle oder aktualisiere die Visualisierung des Zentrums
                 if (!m_markerVisualizations.TryGetValue(-1, out GameObject centerVisualization))
                 {
                     centerVisualization = GameObject.CreatePrimitive(PrimitiveType.Sphere);
@@ -1529,7 +1386,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                 }
                 
                 centerVisualization.transform.position = boardCenter;
-                Debug.Log($"[Visualization] Updated board center visualization at {boardCenter}");
             }
             
             // Visualisierungen für die gemittelten Positionen
@@ -1583,13 +1439,11 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                     }
                     
                     m_averagedPositionVisualizations[markerId] = avgVisualization;
-                    Debug.Log($"[Visualization] Created averaged position visualization for marker {markerId}");
                 }
                 
                 // Position aktualisieren
                 avgVisualization.transform.position = avgPose.position;
                 avgVisualization.transform.rotation = Quaternion.identity; // Keine Rotation für die Visualisierung
-                Debug.Log($"[Visualization] Updated averaged position for marker {markerId} at {avgPose.position}");
             }
         }
 
@@ -1603,7 +1457,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                 GameObject markerObject = entry.Value;
                 if (markerObject != null && markerObject.transform.parent != null)
                 {
-                    Debug.Log($"Unparenting marker object: {markerObject.name} from {markerObject.transform.parent.name}");
                     markerObject.transform.parent = null; // Root-Level in der Hierarchie
                 }
             }
@@ -1625,7 +1478,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                     {
                         rb.isKinematic = true;
                         rb.detectCollisions = false;
-                        Debug.Log($"Froze physics on marker object: {markerObject.name}");
                     }
                     
                     // Alle Collider deaktivieren
@@ -1677,16 +1529,12 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
             
             // Liste aller erkannten Marker-IDs
             string markersStr = string.Join(", ", detectedMarkerIds);
-            Debug.Log($"[Marker Detection] Raw detected markers: {markersStr}");
             
             // Details zu jedem Marker
             foreach (int markerId in detectedMarkerIds)
             {
                 if (qualityMetrics.TryGetValue(markerId, out var metrics))
                 {
-                    Debug.Log($"[Marker {markerId}] Area: {metrics.Area:F1} px², " +
-                              $"Perimeter: {metrics.Perimeter:F1} px, " +
-                              $"Corner precision: {metrics.CornerPrecision:F3}");
                 }
             }
         }
@@ -1747,43 +1595,12 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                     // WICHTIG: Extrahiere nur die Y-Komponente für eine stabile Rotation
                     float yRotation = boardRotation.eulerAngles.y;
                     boardRotation = Quaternion.Euler(0, yRotation, 0);
-                    
-                    // Vermeide plötzliche Sprünge in der Rotation durch Stabilisierung
-                    if (m_boardVisualization.transform.rotation != Quaternion.identity)
-                    {
-                        float currentYRotation = m_boardVisualization.transform.rotation.eulerAngles.y;
-                        float angleDifference = Mathf.DeltaAngle(currentYRotation, yRotation);
-                        
-                        // Wenn der Winkelunterschied zu groß ist (z.B. nahe 180 Grad), behalte die aktuelle Rotation bei
-                        if (Mathf.Abs(angleDifference) > 90f)
-                        {
-                            // Wir drehen die Richtung um und addieren 180 Grad
-                            yRotation = (currentYRotation + 180f) % 360f;
-                            boardRotation = Quaternion.Euler(0, yRotation, 0);
-                            Debug.LogWarning($"[Board] Detected rotation flip! Stabilizing to {yRotation} degrees");
-                        }
-                        else if (Mathf.Abs(angleDifference) > 10f)
-                        {
-                            // Für kleinere Änderungen, sanft interpolieren
-                            float smoothedYRotation = Mathf.LerpAngle(currentYRotation, yRotation, 0.2f);
-                            boardRotation = Quaternion.Euler(0, smoothedYRotation, 0);
-                            Debug.Log($"[Board] Smoothing rotation from {currentYRotation} to {yRotation} = {smoothedYRotation}");
-                        }
-                    }
-                    
-                    Debug.Log($"[Board] Using look-at rotation from marker 0 to 2: {boardRotation.eulerAngles.y} degrees");
                 }
-            }
-            else
-            {
-                Debug.Log("[Board] Could not calculate rotation - both markers 0 and 2 required");
             }
             
             // Board-Position und -Rotation aktualisieren
             m_boardVisualization.transform.position = centerPosition;
             m_boardVisualization.transform.rotation = boardRotation;
-            
-            Debug.Log($"[Board] Updated visualization at position {centerPosition}, rotation {boardRotation.eulerAngles}");
         }
 
         /// <summary>
@@ -1827,8 +1644,6 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                         script.enabled = false;
                     }
                 }
-                
-                Debug.Log($"Completely froze object: {markerObject.name}");
             }
             
             // Auch das Board-Objekt einfrieren, falls vorhanden
@@ -1846,8 +1661,14 @@ Debug.Log($"[Camera Sync] Sending transform to Camera Sync: {tempObj.transform.p
                     boardRb.isKinematic = true;
                     boardRb.detectCollisions = false;
                 }
-                
-                Debug.Log("Froze board visualization object");
+            }
+        }
+
+        private void OnDestroy()
+        {
+            if (_tempPoseObject != null)
+            {
+                Destroy(_tempPoseObject);
             }
         }
     }

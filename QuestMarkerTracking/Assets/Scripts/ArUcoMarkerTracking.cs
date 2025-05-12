@@ -165,8 +165,6 @@ namespace TryAR.MarkerTracking
         /// </summary>
         private void ReleaseResources()
         {
-            Debug.Log("Releasing ArUco tracking resources");
-
             if (_processingRgbMat != null)
                 _processingRgbMat.Dispose();
 
@@ -205,7 +203,7 @@ namespace TryAR.MarkerTracking
         /// <param name="message">Error message</param>
         public void HandleError(Source2MatHelperErrorCode errorCode, string message)
         {
-            Debug.Log("ArUco tracking error: " + errorCode + ":" + message);
+            // No Debug.Log calls in this method
         }
 
         /// <summary>
