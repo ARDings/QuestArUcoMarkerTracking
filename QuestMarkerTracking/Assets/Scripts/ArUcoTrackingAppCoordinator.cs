@@ -904,6 +904,8 @@ namespace TryAR.MarkerTracking
                 adjustedTimestamp = unityTimeNs + m_systemToUnityTimeOffsetNs;
             }
 
+            Debug.Log($"Speichere neue Kamera-Pose: Time={adjustedTimestamp}, Pos={cameraPose.position}");
+
             // Store in ring buffer
             m_cameraPoseHistoryIndex = (m_cameraPoseHistoryIndex + 1) % m_cameraPoseHistorySize;
             m_cameraPoseHistory[m_cameraPoseHistoryIndex] = new TimestampedCameraPose
@@ -915,34 +917,85 @@ namespace TryAR.MarkerTracking
         }
 
         /// <summary>
-        /// Returns a transform representing the camera pose at the given timestamp
+        /// Returns a transform representing the interpolated camera pose at the given timestamp
         /// </summary>
         private Transform GetCameraPoseForTimestamp(long sensorTimestamp)
         {
             long adjustedTimestamp = sensorTimestamp - (long)(m_manualTimeOffsetMs * 1000000);
-            int bestIndex = 0;
-            long bestTimeDiff = long.MaxValue;
-            bool foundGoodMatch = false;
+            
+            Debug.Log($"Suche Pose für Timestamp: {adjustedTimestamp}");
+            
+            // Finde die zwei nächstgelegenen Posen
+            int beforeIndex = -1;
+            int afterIndex = -1;
+            long beforeTimeDiff = long.MaxValue;
+            long afterTimeDiff = long.MaxValue;
 
+            // Suche die nächsten Posen vor und nach dem Ziel-Timestamp
             for (int i = 0; i < m_cameraPoseHistorySize; i++)
             {
                 if (m_cameraPoseHistory[i].Timestamp == 0) continue;
                 
-                long timeDiff = Math.Abs(m_cameraPoseHistory[i].Timestamp - adjustedTimestamp);
-                if (timeDiff < bestTimeDiff)
+                long timeDiff = m_cameraPoseHistory[i].Timestamp - adjustedTimestamp;
+                
+                // Log jede geprüfte Pose
+                Debug.Log($"Prüfe Index {i}: Timestamp={m_cameraPoseHistory[i].Timestamp}, " +
+                         $"TimeDiff={timeDiff}ns ({timeDiff/1000000.0f}ms)");
+                
+                if (timeDiff <= 0 && -timeDiff < beforeTimeDiff)
                 {
-                    bestTimeDiff = timeDiff;
-                    bestIndex = i;
-                    foundGoodMatch = timeDiff / 1000000.0f <= m_currentTimeDifferenceThresholdMs;
+                    // Pose liegt vor dem Ziel-Timestamp
+                    beforeTimeDiff = -timeDiff;
+                    beforeIndex = i;
+                    Debug.Log($"Neue beste 'vor' Pose gefunden: Index={i}, TimeDiff={beforeTimeDiff}ns");
+                }
+                else if (timeDiff > 0 && timeDiff < afterTimeDiff)
+                {
+                    // Pose liegt nach dem Ziel-Timestamp
+                    afterTimeDiff = timeDiff;
+                    afterIndex = i;
+                    Debug.Log($"Neue beste 'nach' Pose gefunden: Index={i}, TimeDiff={afterTimeDiff}ns");
                 }
             }
 
-            // Verwende das existierende GameObject statt ein neues zu erstellen
-            _tempPoseObject.transform.position = m_cameraPoseHistory[bestIndex].Position;
-            _tempPoseObject.transform.rotation = m_cameraPoseHistory[bestIndex].Rotation;
-
-            if (!foundGoodMatch && bestTimeDiff / 1000000.0f > m_currentTimeDifferenceThresholdMs)
+            // Prüfe ob wir zwei gültige Posen gefunden haben
+            if (beforeIndex == -1 || afterIndex == -1)
             {
+                Debug.LogWarning($"Keine gültigen Posen gefunden! BeforeIndex={beforeIndex}, AfterIndex={afterIndex}");
+                m_skippedFrameCount++;
+                return null;
+            }
+
+            // Berechne den Interpolationsfaktor (0-1)
+            float totalTimeDiff = beforeTimeDiff + afterTimeDiff;
+            float t = (float)beforeTimeDiff / totalTimeDiff;
+            
+            Debug.Log($"Interpoliere zwischen Posen: " +
+                      $"\nBefore (Index {beforeIndex}): Time={m_cameraPoseHistory[beforeIndex].Timestamp}, Pos={m_cameraPoseHistory[beforeIndex].Position}" +
+                      $"\nAfter (Index {afterIndex}): Time={m_cameraPoseHistory[afterIndex].Timestamp}, Pos={m_cameraPoseHistory[afterIndex].Position}" +
+                      $"\nInterpolationsfaktor t={t}");
+
+            // Hole die zwei Posen
+            TimestampedCameraPose beforePose = m_cameraPoseHistory[beforeIndex];
+            TimestampedCameraPose afterPose = m_cameraPoseHistory[afterIndex];
+
+            // Interpoliere Position und Rotation
+            Vector3 interpolatedPosition = Vector3.Lerp(beforePose.Position, afterPose.Position, t);
+            Quaternion interpolatedRotation = Quaternion.Slerp(beforePose.Rotation, afterPose.Rotation, t);
+            
+            Debug.Log($"Interpolierte Position: {interpolatedPosition}");
+
+            // Verwende das existierende temporäre GameObject
+            _tempPoseObject.transform.position = interpolatedPosition;
+            _tempPoseObject.transform.rotation = interpolatedRotation;
+
+            // Prüfe ob die Zeitdifferenz innerhalb akzeptabler Grenzen liegt
+            if (beforeTimeDiff / 1000000.0f > m_currentTimeDifferenceThresholdMs || 
+                afterTimeDiff / 1000000.0f > m_currentTimeDifferenceThresholdMs)
+            {
+                Debug.LogWarning($"Zeitdifferenz zu groß! BeforeTimeDiff={beforeTimeDiff/1000000.0f}ms, " +
+                                $"AfterTimeDiff={afterTimeDiff/1000000.0f}ms, " +
+                                $"Threshold={m_currentTimeDifferenceThresholdMs}ms");
                 m_skippedFrameCount++;
                 return null;
             }

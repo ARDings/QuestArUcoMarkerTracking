@@ -25,7 +25,7 @@ class RepeatingCaptureSessionWrapper(
     private val cameraThread = HandlerThread("CameraThread").apply { start() }
     private val cameraHandler = Handler(cameraThread.looper)
     private var currentCameraPose: CameraPose? = null
-
+    val frameDurationNs = 210_000_000L
     override fun startCaptureSession(cameraDevice: CameraDevice, captureTemplate: Int) {
         try {
             imageReader.setOnImageAvailableListener(this, cameraHandler)
@@ -37,13 +37,24 @@ class RepeatingCaptureSessionWrapper(
                 addTarget(imageReader.surface)
 
                 // Setze die Framerate auf 5 FPS
-                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range<Int>(5, 5))
+                set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range<Int>(1, 1))
+                set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_OFF)
+                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF)
+                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
 
                 // Aktiviere Auto-Exposure
-                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+
 
                 // Optional: Setze Priorität auf Bildqualität statt Framerate
                 set(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, CaptureRequest.CONTROL_AE_ANTIBANDING_MODE_50HZ)
+
+                // Hier wird die minimale Zeit zwischen zwei Frames gesetzt
+                set(CaptureRequest.SENSOR_FRAME_DURATION, frameDurationNs)
+
+                // Optional: Belichtungszeit (kürzer als Frame Duration!)
+                set(CaptureRequest.SENSOR_EXPOSURE_TIME, 100_000_000L) // z. B. 100 ms
+
             }
 
             cameraDevice.createCaptureSession(
@@ -66,22 +77,22 @@ class RepeatingCaptureSessionWrapper(
                                         val timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP)
                                         val focalLength = result.get(CaptureResult.LENS_FOCAL_LENGTH)
                                         val aperture = result.get(CaptureResult.LENS_APERTURE)
-                                        
+
                                         // Hole die physische Orientierung und Position der Kamera
                                         val orientation = result.get(CaptureResult.LENS_POSE_ROTATION)
                                         val translation = result.get(CaptureResult.LENS_POSE_TRANSLATION)
-                                        
+
                                         // Sende die Zeitstempel und Kamera-Metadaten
                                         val poseData = "campose:" +
-                                                       "${timestamp}:" +
-                                                       "${focalLength}:" +
-                                                       "${aperture}:" +
-                                                       "${orientation?.joinToString(",")}:" +
-                                                       "${translation?.joinToString(",")}"
+                                                "${timestamp}:" +
+                                                "${focalLength}:" +
+                                                "${aperture}:" +
+                                                "${orientation?.joinToString(",")}:" +
+                                                "${translation?.joinToString(",")}"
 
                                         UnityPlayer.UnitySendMessage(
                                             unityListener,
-                                            "_onCameraPose", 
+                                            "_onCameraPose",
                                             poseData
                                         )
                                     }

@@ -1996,7 +1996,7 @@ MonoBehaviour:
   m_visualScaleFactor: 1
   m_processingDivider: 1
   m_cameraPoseHistorySize: 1000
-  m_currentTimeDifferenceThresholdMs: 2
+  m_currentTimeDifferenceThresholdMs: 15
   m_requireAllGridBoardMarkers: 1
   m_expectedMarkerCount: 6
   m_gridBoardMarkerIds: 000000000100000002000000030000000400000005000000
@@ -2004,7 +2004,7 @@ MonoBehaviour:
   m_posesToCollect: 1
   m_previousAverageWeight: 0
   m_resetCollectionAfterApplying: 1
-  m_manualTimeOffsetMs: 40
+  m_manualTimeOffsetMs: 0
   m_timeOffsetAdjustSpeed: 1
   m_qualityIndicator: {fileID: 0}
   m_excellentQualityMaterial: {fileID: 0}
